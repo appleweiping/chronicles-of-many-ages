@@ -117,6 +117,11 @@ class BalanceParameters:
     command_skim_base_rate: float = 0.18
     command_resistance_threshold: float = 35.0
     command_skimming_threshold: float = 55.0
+    command_skimming_integrity_penalty: float = 14.0
+    command_skimming_civil_order_penalty: float = 9.0
+    command_local_retention_stability_gain: float = 4.0
+    command_compliance_civil_order_gain: float = 2.5
+    command_resistance_integrity_penalty: float = 7.0
     loot_remittance_rate: float = 0.55
     relation_templates: dict[str, dict[str, float]] = field(
         default_factory=lambda: {

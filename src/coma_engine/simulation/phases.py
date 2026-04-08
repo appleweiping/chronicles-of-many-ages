@@ -96,6 +96,19 @@ def _merge_resource_bundle(target: dict[str, float], incoming: dict[str, float],
         target[resource] = target.get(resource, 0.0) + amount * scale
 
 
+def _bundle_value(bundle: dict[str, float]) -> float:
+    rates = _resource_value_rates()
+    return sum(bundle.get(resource, 0.0) * rates[resource] for resource in rates)
+
+
+def _scaled_bundle(bundle: dict[str, float], scale: float) -> dict[str, float]:
+    return {resource: amount * scale for resource, amount in bundle.items()}
+
+
+def _rounded_bundle(bundle: dict[str, float]) -> dict[str, float]:
+    return {resource: round(amount, 2) for resource, amount in bundle.items()}
+
+
 def _executor_alignment_score(world: WorldState, executor_id: str, polity: Polity, settlement: Settlement) -> float:
     executor = world.npcs[executor_id]
     relation = executor.relationships.get(polity.ruler_npc_id, RelationEntry())
@@ -1243,6 +1256,10 @@ def _execute_command_chain(world: WorldState) -> None:
     command_subjects: dict[str, str] = world.history_index["command_packet_subjects"]  # type: ignore[assignment]
     command_execution_log: list[dict[str, object]] = world.history_index["command_execution_log"]  # type: ignore[assignment]
     local_command_log: list[dict[str, object]] = world.history_index["local_command_log"]  # type: ignore[assignment]
+    resource_flow_log: list[dict[str, object]] = world.history_index["resource_flow_log"]  # type: ignore[assignment]
+    command_consequence_log: list[dict[str, object]] = world.history_index["command_consequence_log"]  # type: ignore[assignment]
+    legitimacy_log: list[dict[str, object]] = world.history_index["legitimacy_log"]  # type: ignore[assignment]
+    params = world.config.balance_parameters
     for packet in world.info_packets:
         if packet.content_domain != "command" or packet.id in executed_packets:
             continue
@@ -1309,18 +1326,119 @@ def _execute_command_chain(world: WorldState) -> None:
         if execution_score >= 55.0:
             if mode == "resist":
                 polity.command_network_state["latency"] = min(100.0, polity.command_network_state.get("latency", 0.0) + 5.0)
+                polity.command_network_state["integrity"] = world.clamp_metric(
+                    polity.command_network_state.get("integrity", 0.0) - params.command_resistance_integrity_penalty
+                )
+                polity.legitimacy_components["civil_order"] = world.clamp_metric(
+                    polity.legitimacy_components.get("civil_order", 50.0) - 3.0
+                )
                 settlement.stability = world.clamp_metric(settlement.stability - 1.0)
+                command_consequence_log.append(
+                    {
+                        "step": world.current_step,
+                        "packet_id": packet.id,
+                        "settlement_id": settlement.id,
+                        "polity_id": polity.id,
+                        "kind": "resistance",
+                        "integrity_delta": round(-params.command_resistance_integrity_penalty, 2),
+                        "civil_order_delta": -3.0,
+                        "settlement_stability_delta": -1.0,
+                    }
+                )
+                legitimacy_log.append(
+                    {
+                        "step": world.current_step,
+                        "polity_id": polity.id,
+                        "kind": "command_resistance",
+                        "delta": -3.0,
+                    }
+                )
                 outcome = "resisted"
             elif command_subject == "formal_tax_order":
                 target_value = settlement.current_taxable_output * max(0.15, min(0.65, execution_score / 100.0)) * compliance
-                extracted_bundle, extracted_value = _extract_value_bundle(settlement.stored_resources, target_value)
+                extracted_bundle, _ = _extract_value_bundle(settlement.stored_resources, target_value)
                 leakage = max(0.0, 1.0 - polity.administrative_reach / 100.0)
                 remitted_rate = max(0.0, (1.0 - leakage) * (1.0 - skim_rate))
+                remitted_bundle = _scaled_bundle(extracted_bundle, remitted_rate)
+                retained_bundle = _scaled_bundle(extracted_bundle, 1.0 - remitted_rate)
                 _merge_resource_bundle(polity.treasury, extracted_bundle, remitted_rate)
                 _merge_resource_bundle(settlement.stored_resources, extracted_bundle, 1.0 - remitted_rate)
                 polity.tax_leakage_rate = leakage
+                resource_flow_log.append(
+                    {
+                        "step": world.current_step,
+                        "flow_type": "tax_command",
+                        "packet_id": packet.id,
+                        "settlement_id": settlement.id,
+                        "polity_id": polity.id,
+                        "command_subject": command_subject,
+                        "mode": mode,
+                        "extracted_bundle": _rounded_bundle(extracted_bundle),
+                        "remitted_bundle": _rounded_bundle(remitted_bundle),
+                        "retained_bundle": _rounded_bundle(retained_bundle),
+                        "extracted_value": round(_bundle_value(extracted_bundle), 2),
+                        "remitted_value": round(_bundle_value(remitted_bundle), 2),
+                        "retained_value": round(_bundle_value(retained_bundle), 2),
+                    }
+                )
                 for npc_id in local_executors[:3]:
                     apply_relation_template_between(world, npc_id, polity.ruler_npc_id, "extractive_taxation")
+                if skim_rate > 0.0:
+                    integrity_delta = -skim_rate * params.command_skimming_integrity_penalty
+                    civil_order_delta = -skim_rate * params.command_skimming_civil_order_penalty
+                    stability_delta = skim_rate * params.command_local_retention_stability_gain
+                    polity.command_network_state["integrity"] = world.clamp_metric(
+                        polity.command_network_state.get("integrity", 0.0) + integrity_delta
+                    )
+                    polity.legitimacy_components["civil_order"] = world.clamp_metric(
+                        polity.legitimacy_components.get("civil_order", 50.0) + civil_order_delta
+                    )
+                    settlement.stability = world.clamp_metric(settlement.stability + stability_delta)
+                    command_consequence_log.append(
+                        {
+                            "step": world.current_step,
+                            "packet_id": packet.id,
+                            "settlement_id": settlement.id,
+                            "polity_id": polity.id,
+                            "kind": "skimming",
+                            "integrity_delta": round(integrity_delta, 2),
+                            "civil_order_delta": round(civil_order_delta, 2),
+                            "settlement_stability_delta": round(stability_delta, 2),
+                        }
+                    )
+                    legitimacy_log.append(
+                        {
+                            "step": world.current_step,
+                            "polity_id": polity.id,
+                            "kind": "command_skimming",
+                            "delta": round(civil_order_delta, 2),
+                        }
+                    )
+                else:
+                    civil_order_delta = remitted_rate * params.command_compliance_civil_order_gain
+                    polity.legitimacy_components["civil_order"] = world.clamp_metric(
+                        polity.legitimacy_components.get("civil_order", 50.0) + civil_order_delta
+                    )
+                    command_consequence_log.append(
+                        {
+                            "step": world.current_step,
+                            "packet_id": packet.id,
+                            "settlement_id": settlement.id,
+                            "polity_id": polity.id,
+                            "kind": "compliance",
+                            "integrity_delta": 0.0,
+                            "civil_order_delta": round(civil_order_delta, 2),
+                            "settlement_stability_delta": 0.0,
+                        }
+                    )
+                    legitimacy_log.append(
+                        {
+                            "step": world.current_step,
+                            "polity_id": polity.id,
+                            "kind": "command_compliance",
+                            "delta": round(civil_order_delta, 2),
+                        }
+                    )
                 outcome = "executed_with_skimming" if skim_rate > 0.0 else "executed"
             elif command_subject == "resource_levy":
                 levy_bundle = {}
@@ -1328,10 +1446,60 @@ def _execute_command_chain(world: WorldState) -> None:
                     extracted = settlement.stored_resources.get(resource, 0.0) * 0.15 * compliance
                     settlement.stored_resources[resource] = settlement.stored_resources.get(resource, 0.0) - extracted
                     levy_bundle[resource] = extracted
+                remitted_bundle = _scaled_bundle(levy_bundle, 1.0 - skim_rate)
+                retained_bundle = _scaled_bundle(levy_bundle, skim_rate)
                 _merge_resource_bundle(polity.treasury, levy_bundle, 1.0 - skim_rate)
                 _merge_resource_bundle(settlement.stored_resources, levy_bundle, skim_rate)
+                resource_flow_log.append(
+                    {
+                        "step": world.current_step,
+                        "flow_type": "resource_levy",
+                        "packet_id": packet.id,
+                        "settlement_id": settlement.id,
+                        "polity_id": polity.id,
+                        "command_subject": command_subject,
+                        "mode": mode,
+                        "extracted_bundle": _rounded_bundle(levy_bundle),
+                        "remitted_bundle": _rounded_bundle(remitted_bundle),
+                        "retained_bundle": _rounded_bundle(retained_bundle),
+                        "extracted_value": round(_bundle_value(levy_bundle), 2),
+                        "remitted_value": round(_bundle_value(remitted_bundle), 2),
+                        "retained_value": round(_bundle_value(retained_bundle), 2),
+                    }
+                )
                 for npc_id in local_executors[:3]:
                     apply_relation_template_between(world, npc_id, polity.ruler_npc_id, "extractive_taxation")
+                if skim_rate > 0.0:
+                    integrity_delta = -skim_rate * params.command_skimming_integrity_penalty * 0.8
+                    civil_order_delta = -skim_rate * params.command_skimming_civil_order_penalty * 0.8
+                    stability_delta = skim_rate * params.command_local_retention_stability_gain * 0.8
+                    polity.command_network_state["integrity"] = world.clamp_metric(
+                        polity.command_network_state.get("integrity", 0.0) + integrity_delta
+                    )
+                    polity.legitimacy_components["civil_order"] = world.clamp_metric(
+                        polity.legitimacy_components.get("civil_order", 50.0) + civil_order_delta
+                    )
+                    settlement.stability = world.clamp_metric(settlement.stability + stability_delta)
+                    command_consequence_log.append(
+                        {
+                            "step": world.current_step,
+                            "packet_id": packet.id,
+                            "settlement_id": settlement.id,
+                            "polity_id": polity.id,
+                            "kind": "skimming",
+                            "integrity_delta": round(integrity_delta, 2),
+                            "civil_order_delta": round(civil_order_delta, 2),
+                            "settlement_stability_delta": round(stability_delta, 2),
+                        }
+                    )
+                    legitimacy_log.append(
+                        {
+                            "step": world.current_step,
+                            "polity_id": polity.id,
+                            "kind": "command_skimming",
+                            "delta": round(civil_order_delta, 2),
+                        }
+                    )
                 outcome = "executed_with_skimming" if skim_rate > 0.0 else "executed"
             elif command_subject == "muster_force":
                 profile = _settlement_population_profile(world, settlement.id)
@@ -1339,6 +1507,19 @@ def _execute_command_chain(world: WorldState) -> None:
                 settlement.stored_resources["food"] = max(0.0, settlement.stored_resources.get("food", 0.0) - combat_draw * 0.8)
                 polity.military_strength_base = world.clamp_metric(polity.military_strength_base + combat_draw * 4.0)
                 polity.war_readiness = world.clamp_metric(polity.war_readiness + combat_draw * 8.0)
+                resource_flow_log.append(
+                    {
+                        "step": world.current_step,
+                        "flow_type": "muster_force",
+                        "packet_id": packet.id,
+                        "settlement_id": settlement.id,
+                        "polity_id": polity.id,
+                        "command_subject": command_subject,
+                        "mode": mode,
+                        "combat_draw": round(combat_draw, 2),
+                        "food_cost": round(combat_draw * 0.8, 2),
+                    }
+                )
                 for npc_id in local_executors[:3]:
                     apply_relation_template_between(world, npc_id, polity.ruler_npc_id, "repression")
                 outcome = "softened" if mode == "soften" else "executed"
@@ -1350,6 +1531,18 @@ def _execute_command_chain(world: WorldState) -> None:
                     stability_gain *= 0.75
                 settlement.security_level = world.clamp_metric(settlement.security_level + security_gain)
                 settlement.stability = world.clamp_metric(settlement.stability + stability_gain)
+                command_consequence_log.append(
+                    {
+                        "step": world.current_step,
+                        "packet_id": packet.id,
+                        "settlement_id": settlement.id,
+                        "polity_id": polity.id,
+                        "kind": "order_enforced",
+                        "integrity_delta": 0.0,
+                        "civil_order_delta": 0.0,
+                        "settlement_stability_delta": round(stability_gain, 2),
+                    }
+                )
                 for npc_id in local_executors[:3]:
                     apply_relation_template_between(world, npc_id, polity.ruler_npc_id, "repression")
                 emit_info_packet(
@@ -1395,6 +1588,7 @@ def _execute_command_chain(world: WorldState) -> None:
 
 def _update_taxation(world: WorldState) -> None:
     active_war_fatigue: dict[str, float] = {}
+    resource_flow_log: list[dict[str, object]] = world.history_index["resource_flow_log"]  # type: ignore[assignment]
     for war in world.war_states.values():
         if war.status != "active":
             continue
@@ -1420,12 +1614,24 @@ def _update_taxation(world: WorldState) -> None:
             )
             war_penalty = active_war_fatigue.get(polity.id, 0.0) * 0.15
             polity.administrative_reach = world.clamp_metric(70.0 - distance_cost * 4.0 - war_penalty)
+            resource_flow_log.append(
+                {
+                    "step": world.current_step,
+                    "flow_type": "tax_base",
+                    "settlement_id": settlement.id,
+                    "polity_id": polity.id,
+                    "labor_ratio": round(labor_ratio, 2),
+                    "taxable_output": round(produced, 2),
+                    "administrative_reach": round(polity.administrative_reach, 2),
+                }
+            )
 
 
 def _update_war_states(world: WorldState) -> None:
     war_log: list[dict[str, object]] = world.history_index["war_log"]  # type: ignore[assignment]
     legitimacy_log: list[dict[str, object]] = world.history_index["legitimacy_log"]  # type: ignore[assignment]
     loot_remittance_log: list[dict[str, object]] = world.history_index["loot_remittance_log"]  # type: ignore[assignment]
+    resource_flow_log: list[dict[str, object]] = world.history_index["resource_flow_log"]  # type: ignore[assignment]
     active_participants: set[str] = set()
     for war in world.war_states.values():
         if war.status != "active":
@@ -1458,9 +1664,32 @@ def _update_war_states(world: WorldState) -> None:
         winner_capital = world.settlements[winner.capital_settlement_id]
         winner_capital.stored_resources["wealth"] = winner_capital.stored_resources.get("wealth", 0.0) + loot
         winner_capital.stored_resources["food"] = winner_capital.stored_resources.get("food", 0.0) + loot * 0.2
+        resource_flow_log.append(
+            {
+                "step": world.current_step,
+                "flow_type": "war_loot_capture",
+                "war_id": war.id,
+                "settlement_id": winner_capital.id,
+                "polity_id": winner.id,
+                "captured_bundle": {"wealth": round(loot, 2), "food": round(loot * 0.2, 2)},
+                "captured_value": round(loot * 1.2, 2),
+            }
+        )
         remitted = loot * world.config.balance_parameters.loot_remittance_rate * max(0.2, winner.administrative_reach / 100.0)
         winner_capital.stored_resources["wealth"] = max(0.0, winner_capital.stored_resources.get("wealth", 0.0) - remitted)
         winner.treasury["wealth"] = winner.treasury.get("wealth", 0.0) + remitted
+        resource_flow_log.append(
+            {
+                "step": world.current_step,
+                "flow_type": "war_loot_remittance",
+                "war_id": war.id,
+                "settlement_id": winner_capital.id,
+                "polity_id": winner.id,
+                "remitted_bundle": {"wealth": round(remitted, 2)},
+                "retained_bundle": {"wealth": round(max(0.0, loot - remitted), 2), "food": round(loot * 0.2, 2)},
+                "remitted_value": round(remitted, 2),
+            }
+        )
         loot_remittance_log.append(
             {
                 "step": world.current_step,

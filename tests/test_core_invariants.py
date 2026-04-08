@@ -19,7 +19,13 @@ from coma_engine.core.transfers import (
     reconcile_references,
     validate_reference_consistency,
 )
-from coma_engine.explain import debug_grade_action_explanations, player_grade_npc_summary
+from coma_engine.explain import (
+    debug_grade_action_explanations,
+    debug_grade_step_report,
+    player_grade_npc_summary,
+    player_grade_polity_summary,
+    player_grade_settlement_summary,
+)
 from coma_engine.models.entities import Event, Faction, MemoryEntry, RelationEntry, Settlement
 from coma_engine.player.interventions import queue_information_intervention, queue_npc_modifier_intervention
 from coma_engine.simulation.engine import SimulationEngine
@@ -197,6 +203,15 @@ class CoreInvariantTests(unittest.TestCase):
         run_political_phase(world.clone_for_phase(), world)
         self.assertTrue(any(entry["mode"] == "skim" for entry in world.history_index["local_command_log"]))
         self.assertGreater(world.polities[polity_id].treasury["wealth"], before_treasury)
+        self.assertTrue(
+            any(
+                entry["flow_type"] == "tax_command" and entry["retained_value"] > 0.0
+                for entry in world.history_index["resource_flow_log"]
+            )
+        )
+        self.assertTrue(
+            any(entry["kind"] == "skimming" for entry in world.history_index["command_consequence_log"])
+        )
 
 
     def test_children_do_not_count_as_full_labor_pool(self) -> None:
@@ -337,6 +352,12 @@ class CoreInvariantTests(unittest.TestCase):
         before_local = world.settlements[winner_capital_id].stored_resources["wealth"]
         run_political_phase(world.clone_for_phase(), world)
         self.assertTrue(world.history_index["loot_remittance_log"])
+        self.assertTrue(
+            any(entry["flow_type"] == "war_loot_capture" for entry in world.history_index["resource_flow_log"])
+        )
+        self.assertTrue(
+            any(entry["flow_type"] == "war_loot_remittance" for entry in world.history_index["resource_flow_log"])
+        )
         self.assertGreaterEqual(world.settlements[winner_capital_id].stored_resources["wealth"], before_local)
 
     def test_player_grade_npc_summary_hides_raw_needs_dict(self) -> None:
@@ -452,6 +473,31 @@ class CoreInvariantTests(unittest.TestCase):
         self.assertGreater(settlement.security_level, before_security)
         self.assertGreater(relation.fear, 0.0)
         self.assertGreater(relation.grievance, 0.0)
+
+    def test_debug_and_player_views_surface_resource_chain(self) -> None:
+        world = create_world(default_config(seed=63))
+        leader = max(world.npcs.values(), key=lambda npc: npc.office_rank)
+        _found_polity(world, leader.id, leader.settlement_id)
+        polity_id = next(iter(world.polities))
+        settlement = world.settlements[leader.settlement_id]
+        settlement.stored_resources = {"food": 10.0, "wood": 4.0, "ore": 1.0, "wealth": 16.0}
+        settlement.stability = 46.0
+        local_executor_id = next(npc_id for npc_id in settlement.resident_npc_ids if npc_id != leader.id)
+        assign_npc_faction(world, local_executor_id, None)
+        world.npcs[local_executor_id].office_rank = 1
+        world.npcs[local_executor_id].relationships[leader.id] = RelationEntry(
+            trust=6.0, fear=10.0, grievance=34.0, familiarity=10.0
+        )
+        packet_id = emit_command_packet(world, leader.id, settlement.id, "formal_tax_order")
+        world.history_index["packet_deliveries"][packet_id] = [local_executor_id]
+        run_political_phase(world.clone_for_phase(), world)
+        debug_lines = debug_grade_step_report(world, world.current_step)
+        settlement_lines = player_grade_settlement_summary(world, settlement.id)
+        polity_lines = player_grade_polity_summary(world, polity_id)
+        self.assertTrue(any(line.startswith("resource_flow:") for line in debug_lines))
+        self.assertTrue(any(line.startswith("command_effect:") for line in debug_lines))
+        self.assertTrue(any("taxable_output=" in line for line in settlement_lines))
+        self.assertTrue(any("network_integrity=" in line for line in polity_lines))
 
 
 if __name__ == "__main__":

@@ -73,6 +73,46 @@ def debug_grade_step_report(world: WorldState, step: int) -> list[str]:
             f"{entry.get('executor_id')}:{entry.get('command_subject')}:"
             f"{entry.get('mode')}:compliance={entry.get('compliance')}"
         )
+    resource_flow_log: list[dict[str, object]] = world.history_index["resource_flow_log"]  # type: ignore[assignment]
+    for entry in resource_flow_log[-6:]:
+        flow_type = entry.get("flow_type")
+        if flow_type == "tax_base":
+            lines.append(
+                "resource_flow:"
+                f"tax_base:{entry.get('settlement_id')}:taxable={entry.get('taxable_output')}:"
+                f"reach={entry.get('administrative_reach')}"
+            )
+        elif flow_type in {"tax_command", "resource_levy"}:
+            lines.append(
+                "resource_flow:"
+                f"{flow_type}:{entry.get('settlement_id')}:remitted={entry.get('remitted_value')}:"
+                f"retained={entry.get('retained_value')}"
+            )
+        elif flow_type == "muster_force":
+            lines.append(
+                "resource_flow:"
+                f"muster:{entry.get('settlement_id')}:combat_draw={entry.get('combat_draw')}:"
+                f"food_cost={entry.get('food_cost')}"
+            )
+        elif flow_type == "war_loot_capture":
+            lines.append(
+                "resource_flow:"
+                f"war_capture:{entry.get('settlement_id')}:value={entry.get('captured_value')}"
+            )
+        elif flow_type == "war_loot_remittance":
+            lines.append(
+                "resource_flow:"
+                f"war_remit:{entry.get('settlement_id')}:remitted={entry.get('remitted_value')}"
+            )
+    command_consequence_log: list[dict[str, object]] = world.history_index["command_consequence_log"]  # type: ignore[assignment]
+    for entry in command_consequence_log[-5:]:
+        lines.append(
+            "command_effect:"
+            f"{entry.get('kind')}:{entry.get('settlement_id')}:"
+            f"integrity={entry.get('integrity_delta')}:"
+            f"civil_order={entry.get('civil_order_delta')}:"
+            f"stability={entry.get('settlement_stability_delta')}"
+        )
     belief_log: list[dict[str, object]] = world.history_index["belief_log"]  # type: ignore[assignment]
     for entry in belief_log[-5:]:
         lines.append(
@@ -138,7 +178,8 @@ def player_grade_settlement_summary(world: WorldState, settlement_id: str) -> li
     return [
         f"{settlement.id} {settlement.name}",
         f"residents={resident_count} polity={settlement.polity_id} faction={settlement.faction_id}",
-        f"food={settlement.stored_resources.get('food', 0.0):.1f} wood={settlement.stored_resources.get('wood', 0.0):.1f} ore={settlement.stored_resources.get('ore', 0.0):.1f}",
+        f"food={settlement.stored_resources.get('food', 0.0):.1f} wood={settlement.stored_resources.get('wood', 0.0):.1f} ore={settlement.stored_resources.get('ore', 0.0):.1f} wealth={settlement.stored_resources.get('wealth', 0.0):.1f}",
+        f"taxable_output={settlement.current_taxable_output:.1f} labor_pool={settlement.labor_pool:.1f}",
         f"stability={_trend_label(settlement.stability)} security={_trend_label(settlement.security_level)}",
     ]
 
@@ -153,4 +194,5 @@ def player_grade_polity_summary(world: WorldState, polity_id: str) -> list[str]:
         f"capital={polity.capital_settlement_id} ruler={polity.ruler_npc_id}",
         f"stability={_trend_label(polity.stability)} reach={_trend_label(polity.administrative_reach)} war_readiness={_trend_label(polity.war_readiness)}",
         f"legitimacy_support={_trend_label(legitimacy.get('support', 0.0))} civil_order={_trend_label(legitimacy.get('civil_order', 50.0))}",
+        f"treasury_food={_trend_label(polity.treasury.get('food', 0.0))} treasury_wealth={_trend_label(polity.treasury.get('wealth', 0.0))} network_integrity={_trend_label(polity.command_network_state.get('integrity', 0.0))}",
     ]

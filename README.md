@@ -37,6 +37,7 @@ This repository implements the first-pass formal systems foundation described in
 - Event materialization from action outcomes with derived memories and info packets
 - Formal command packets with delivery, delay, distortion, resistance, and execution records
 - Local command translation with compliance, softening, resistance, and skimming outcomes
+- Resource-flow tracing for tax base, command remittance, local retention, muster costs, and war-loot remittance
 - Persistent archives for dissolved settlements, factions, and polities so history references remain valid
 - Active organization mirrors are cleaned on archive while archived objects remain resolvable for history/debug use
 - First-pass continuous-action semantics for partial progress, interruption, and outcome recording
@@ -45,8 +46,9 @@ This repository implements the first-pass formal systems foundation described in
 - Relation templates now enter execution outcomes and command-chain consequences
 - Memory conversion now feeds back into formal belief-signal propagation instead of disappearing as dead data
 - Formal player intervention queue restricted to approved channels
+- Debug/player explain surfaces now expose command-side effects, resource-flow traces, and higher-level settlement/polity summaries
 - Core invariant tests for replayability, reference consistency, political gating, phase snapshots, action interruption, and command-chain delay
-- Additional invariant tests for local skimming, archive-safe mirror cleanup, and war-loot remittance
+- Additional invariant tests for local skimming, archive-safe mirror cleanup, war-loot remittance, and resource-chain explainability
 
 ## Quick start
 
