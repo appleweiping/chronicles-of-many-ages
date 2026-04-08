@@ -41,11 +41,21 @@ This repository implements the first-pass formal systems foundation described in
 ## Quick start
 
 1. Create a Python 3.12 environment.
-2. Run the tests:
+2. Run the simulation backbone:
+
+```bash
+python -m coma_engine --steps 10 --seed 7
+```
+
+3. Run the tests:
 
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+## What "running" means right now
+
+This repository can now run the formal simulation backbone from the command line. It is not yet a full graphical game client, so there is no windowed launcher or gameplay UI at this stage.
 
 ## Current scope
 
