@@ -140,6 +140,13 @@ def debug_grade_step_report(world: WorldState, step: int) -> list[str]:
             f"{entry.get('war_id')}:{entry.get('winner_settlement_id')}:"
             f"captured={entry.get('captured_loot')}:remitted={entry.get('remitted_loot')}"
         )
+    war_supply_log: list[dict[str, object]] = world.history_index["war_supply_log"]  # type: ignore[assignment]
+    for entry in war_supply_log[-6:]:
+        lines.append(
+            "war_supply:"
+            f"{entry.get('war_id')}:{entry.get('polity_id')}:{entry.get('kind')}:"
+            f"value={entry.get('drawn_value')}:ratio={entry.get('supply_ratio')}"
+        )
     return lines
 
 

@@ -122,6 +122,7 @@ def _interactive_shell(world) -> bool:
             war = world.war_states[parts[1]]
             print(f"{war.id} participants={war.participant_polity_ids} status={war.status}")
             print(f"front_pressure={war.effective_front_pressure:.1f} attrition={war.expected_attrition:.1f} escalation={war.escalation_risk:.1f}")
+            print(f"support={war.war_support_levels} fatigue={war.war_fatigue_levels}")
             continue
         if parts[0] == "bless" and len(parts) == 2 and parts[1] in world.npcs:
             queue_npc_modifier_intervention(

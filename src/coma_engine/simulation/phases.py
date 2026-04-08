@@ -135,6 +135,30 @@ def _desired_allocation_bundle(world: WorldState, polity: Polity, settlement: Se
     return bundle
 
 
+def _war_supply_demand_bundle(world: WorldState, war: WarState, polity: Polity, combat_population: float) -> dict[str, float]:
+    params = world.config.balance_parameters
+    front_factor = max(1.0, war.effective_front_pressure * params.war_supply_front_pressure_scale)
+    return {
+        "food": max(0.5, combat_population * params.war_supply_food_per_combatant * front_factor),
+        "wood": max(0.2, combat_population * params.war_supply_wood_per_combatant * front_factor),
+        "ore": max(0.1, combat_population * params.war_supply_ore_per_combatant * front_factor),
+        "wealth": 0.0,
+    }
+
+
+def _draw_bundle_from_stock(stock: dict[str, float], demand_bundle: dict[str, float], cap_fraction: float = 1.0) -> dict[str, float]:
+    drawn = {resource: 0.0 for resource in demand_bundle}
+    for resource, demand in demand_bundle.items():
+        available = stock.get(resource, 0.0)
+        if demand <= 0.0 or available <= 0.0:
+            continue
+        cap = available * cap_fraction
+        amount = min(demand, cap)
+        stock[resource] = max(0.0, available - amount)
+        drawn[resource] = amount
+    return drawn
+
+
 def _executor_alignment_score(world: WorldState, executor_id: str, polity: Polity, settlement: Settlement) -> float:
     executor = world.npcs[executor_id]
     relation = executor.relationships.get(polity.ruler_npc_id, RelationEntry())
@@ -1780,7 +1804,9 @@ def _update_war_states(world: WorldState) -> None:
     legitimacy_log: list[dict[str, object]] = world.history_index["legitimacy_log"]  # type: ignore[assignment]
     loot_remittance_log: list[dict[str, object]] = world.history_index["loot_remittance_log"]  # type: ignore[assignment]
     resource_flow_log: list[dict[str, object]] = world.history_index["resource_flow_log"]  # type: ignore[assignment]
+    war_supply_log: list[dict[str, object]] = world.history_index["war_supply_log"]  # type: ignore[assignment]
     active_participants: set[str] = set()
+    params = world.config.balance_parameters
     for war in world.war_states.values():
         if war.status != "active":
             continue
@@ -1805,6 +1831,147 @@ def _update_war_states(world: WorldState) -> None:
         war.effective_front_pressure = max(5.0, average_strength * 0.08 - capital_distance)
         war.expected_attrition = max(1.0, world.config.balance_parameters.war_attrition_scale * average_strength * 0.1)
         war.escalation_risk = min(100.0, war.effective_front_pressure + sum(war.war_fatigue_levels.values()) * 0.25)
+        participant_profiles = {
+            attacker.id: attacker_profile,
+            defender.id: defender_profile,
+        }
+        for polity in (attacker, defender):
+            demand_bundle = _war_supply_demand_bundle(world, war, polity, participant_profiles[polity.id]["combat"])
+            remaining_bundle = dict(demand_bundle)
+            supplied_bundle = {resource: 0.0 for resource in demand_bundle}
+            settlement_ids = [
+                settlement_id
+                for settlement_id in polity.member_settlement_ids
+                if settlement_id in world.settlements
+            ]
+            settlement_ids.sort(
+                key=lambda settlement_id: shortest_path_cost(
+                    world,
+                    world.settlements[polity.capital_settlement_id].core_tile_id,
+                    world.settlements[settlement_id].core_tile_id,
+                )
+            )
+            for settlement_id in settlement_ids:
+                settlement = world.settlements[settlement_id]
+                drawn_bundle = _draw_bundle_from_stock(
+                    settlement.stored_resources,
+                    remaining_bundle,
+                    cap_fraction=params.war_supply_settlement_draw_fraction,
+                )
+                if _bundle_value(drawn_bundle) <= 0.0:
+                    continue
+                for resource, amount in drawn_bundle.items():
+                    supplied_bundle[resource] += amount
+                    remaining_bundle[resource] = max(0.0, remaining_bundle[resource] - amount)
+                distance = shortest_path_cost(
+                    world,
+                    world.settlements[polity.capital_settlement_id].core_tile_id,
+                    settlement.core_tile_id,
+                )
+                burden = _bundle_value(drawn_bundle)
+                settlement_stability_delta = -min(3.0, burden * 0.35)
+                settlement.stability = world.clamp_metric(settlement.stability + settlement_stability_delta)
+                resource_flow_log.append(
+                    {
+                        "step": world.current_step,
+                        "flow_type": "war_supply_draw",
+                        "war_id": war.id,
+                        "settlement_id": settlement.id,
+                        "polity_id": polity.id,
+                        "drawn_bundle": _rounded_bundle(drawn_bundle),
+                        "drawn_value": round(burden, 2),
+                        "distance_cost": round(distance if distance != float("inf") else 99.0, 2),
+                    }
+                )
+                war_supply_log.append(
+                    {
+                        "step": world.current_step,
+                        "war_id": war.id,
+                        "polity_id": polity.id,
+                        "settlement_id": settlement.id,
+                        "kind": "settlement_supply",
+                        "drawn_value": round(burden, 2),
+                        "supply_ratio": None,
+                    }
+                )
+                for resident_id in settlement.resident_npc_ids[:2]:
+                    apply_relation_template_between(world, resident_id, polity.ruler_npc_id, "extractive_taxation", scale=0.5)
+            treasury_bundle = _draw_bundle_from_stock(polity.treasury, remaining_bundle)
+            for resource, amount in treasury_bundle.items():
+                supplied_bundle[resource] += amount
+                remaining_bundle[resource] = max(0.0, remaining_bundle[resource] - amount)
+            if _bundle_value(treasury_bundle) > 0.0:
+                resource_flow_log.append(
+                    {
+                        "step": world.current_step,
+                        "flow_type": "war_supply_treasury",
+                        "war_id": war.id,
+                        "settlement_id": polity.capital_settlement_id,
+                        "polity_id": polity.id,
+                        "drawn_bundle": _rounded_bundle(treasury_bundle),
+                        "drawn_value": round(_bundle_value(treasury_bundle), 2),
+                    }
+                )
+            demand_value = max(0.01, _bundle_value(demand_bundle))
+            supplied_value = _bundle_value(supplied_bundle)
+            supply_ratio = min(1.0, supplied_value / demand_value)
+            war.war_support_levels[polity.id] = world.clamp_metric(
+                war.war_support_levels.get(polity.id, 50.0)
+                + (params.war_supply_success_support_gain if supply_ratio >= 0.95 else 0.0)
+                - max(0.0, 1.0 - supply_ratio) * params.war_supply_shortfall_support_penalty
+            )
+            if supply_ratio < 1.0:
+                readiness_delta = -(1.0 - supply_ratio) * params.war_supply_shortfall_readiness_penalty
+                stability_delta = -(1.0 - supply_ratio) * params.war_supply_shortfall_stability_penalty
+                polity.war_readiness = world.clamp_metric(polity.war_readiness + readiness_delta)
+                polity.stability = world.clamp_metric(polity.stability + stability_delta)
+                polity.legitimacy_components["civil_order"] = world.clamp_metric(
+                    polity.legitimacy_components.get("civil_order", 50.0) + stability_delta * 0.8
+                )
+                legitimacy_log.append(
+                    {
+                        "step": world.current_step,
+                        "polity_id": polity.id,
+                        "kind": "war_supply_shortfall",
+                        "delta": round(stability_delta * 0.8, 2),
+                    }
+                )
+            else:
+                polity.war_readiness = world.clamp_metric(polity.war_readiness + 1.5)
+                polity.legitimacy_components["civil_order"] = world.clamp_metric(
+                    polity.legitimacy_components.get("civil_order", 50.0) + 0.8
+                )
+                legitimacy_log.append(
+                    {
+                        "step": world.current_step,
+                        "polity_id": polity.id,
+                        "kind": "war_supply_secured",
+                        "delta": 0.8,
+                    }
+                )
+            resource_flow_log.append(
+                {
+                    "step": world.current_step,
+                    "flow_type": "war_supply_result",
+                    "war_id": war.id,
+                    "settlement_id": polity.capital_settlement_id,
+                    "polity_id": polity.id,
+                    "demand_value": round(demand_value, 2),
+                    "supplied_value": round(supplied_value, 2),
+                    "supply_ratio": round(supply_ratio, 2),
+                }
+            )
+            war_supply_log.append(
+                {
+                    "step": world.current_step,
+                    "war_id": war.id,
+                    "polity_id": polity.id,
+                    "settlement_id": polity.capital_settlement_id,
+                    "kind": "supply_result",
+                    "drawn_value": round(supplied_value, 2),
+                    "supply_ratio": round(supply_ratio, 2),
+                }
+            )
         winner = attacker if attacker_strength >= defender_strength else defender
         loser = defender if winner is attacker else attacker
         loot = min(loser.treasury.get("wealth", 0.0), world.config.balance_parameters.war_loot_rate * max(1.0, war.effective_front_pressure))

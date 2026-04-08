@@ -370,6 +370,89 @@ class CoreInvariantTests(unittest.TestCase):
             self.assertGreater(polity.legitimacy_components.get("war_strain", 0.0), 0.0)
             self.assertLessEqual(polity.treasury["food"], before[polity_id])
 
+    def test_war_supply_draws_from_local_settlements_and_updates_support(self) -> None:
+        world = create_world(default_config(seed=44))
+        leader = max(world.npcs.values(), key=lambda npc: npc.office_rank)
+        _found_polity(world, leader.id, leader.settlement_id)
+        source_residents = [
+            npc.id
+            for npc in world.npcs.values()
+            if npc.settlement_id != leader.settlement_id and npc.id != leader.id
+        ][:3]
+        target_tile = next(
+            tile.id
+            for tile in world.tiles.values()
+            if tile.terrain_type == "plains" and tile.settlement_id is None
+        )
+        second_settlement_id = world.next_id("settlement")
+        world.settlements[second_settlement_id] = Settlement(
+            id=second_settlement_id,
+            name="Supply Camp",
+            core_tile_id=target_tile,
+            member_tile_ids=[target_tile],
+            resident_npc_ids=[],
+            stored_resources={"food": 18.0, "wood": 8.0, "ore": 3.0, "wealth": 4.0},
+            security_level=48.0,
+            stability=56.0,
+            faction_id=None,
+            polity_id=None,
+            active_modifier_ids=[],
+            labor_pool=3.0,
+        )
+        assign_settlement_tiles(world, second_settlement_id, [target_tile])
+        for npc_id in source_residents:
+            move_npc_to_tile(world, npc_id, target_tile)
+            assign_npc_settlement(world, npc_id, second_settlement_id)
+        rival_faction_id = world.next_id("faction")
+        world.factions[rival_faction_id] = Faction(
+            id=rival_faction_id,
+            name="Supply Ring",
+            leader_npc_id=source_residents[0],
+            member_npc_ids=[],
+            settlement_ids=[],
+            support_score=72.0,
+            cohesion=70.0,
+            agenda_type="survival",
+            legitimacy_seed_components={"support": 72.0},
+            active_modifier_ids=[],
+        )
+        for npc_id in source_residents:
+            assign_npc_faction(world, npc_id, rival_faction_id)
+        assign_settlement_faction(world, second_settlement_id, rival_faction_id)
+        rival_leader = world.npcs[source_residents[0]]
+        rival_leader.office_rank = 4
+        _found_polity(world, rival_leader.id, second_settlement_id)
+        polity_ids = list(world.polities)
+        for polity_id in polity_ids:
+            polity = world.polities[polity_id]
+            polity.treasury.update({"food": 6.0, "wood": 3.0, "ore": 1.5, "wealth": 2.0})
+            for settlement_id in polity.member_settlement_ids:
+                world.settlements[settlement_id].stored_resources["food"] += 8.0
+                world.settlements[settlement_id].stored_resources["wood"] += 4.0
+                world.settlements[settlement_id].stored_resources["ore"] += 2.0
+        _declare_war(world, polity_ids[0], polity_ids[1])
+        war_id = next(iter(world.war_states))
+        before_food = {
+            settlement_id: world.settlements[settlement_id].stored_resources["food"]
+            for settlement_id in world.settlements
+        }
+        before_support = dict(world.war_states[war_id].war_support_levels)
+        run_political_phase(world.clone_for_phase(), world)
+        self.assertTrue(world.history_index["war_supply_log"])
+        self.assertTrue(
+            any(entry["flow_type"] == "war_supply_draw" for entry in world.history_index["resource_flow_log"])
+        )
+        self.assertTrue(
+            any(entry["flow_type"] == "war_supply_result" for entry in world.history_index["resource_flow_log"])
+        )
+        self.assertTrue(
+            any(
+                world.settlements[settlement_id].stored_resources["food"] < before_food[settlement_id]
+                for settlement_id in before_food
+            )
+        )
+        self.assertNotEqual(before_support, world.war_states[war_id].war_support_levels)
+
     def test_war_loot_first_enters_settlement_then_partially_remits(self) -> None:
         world = create_world(default_config(seed=45))
         leader = max(world.npcs.values(), key=lambda npc: npc.office_rank)

@@ -67,6 +67,7 @@ class WorldState:
             "loot_remittance_log": [],
             "resource_flow_log": [],
             "command_consequence_log": [],
+            "war_supply_log": [],
             "packet_deliveries": {},
             "executed_command_packets": set(),
         }

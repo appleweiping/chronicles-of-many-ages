@@ -128,6 +128,15 @@ class BalanceParameters:
     allocation_dispatch_fraction: float = 0.8
     allocation_stability_gain_scale: float = 0.35
     allocation_security_gain_scale: float = 0.2
+    war_supply_food_per_combatant: float = 0.22
+    war_supply_wood_per_combatant: float = 0.07
+    war_supply_ore_per_combatant: float = 0.04
+    war_supply_front_pressure_scale: float = 0.09
+    war_supply_settlement_draw_fraction: float = 0.22
+    war_supply_shortfall_readiness_penalty: float = 8.0
+    war_supply_shortfall_support_penalty: float = 12.0
+    war_supply_shortfall_stability_penalty: float = 4.0
+    war_supply_success_support_gain: float = 3.0
     loot_remittance_rate: float = 0.55
     relation_templates: dict[str, dict[str, float]] = field(
         default_factory=lambda: {
