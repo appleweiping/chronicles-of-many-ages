@@ -64,6 +64,8 @@ def materialize_outcomes(world: WorldState) -> None:
     _materialize_command_execution(world)
     _materialize_demographics(world)
     _materialize_war_changes(world)
+    _materialize_war_supply(world)
+    _materialize_war_command_changes(world)
     _materialize_loot_remittance(world)
     _materialize_legitimacy_changes(world)
     _convert_memories(world)
@@ -116,8 +118,10 @@ def _derive_packets(world: WorldState, event: Event) -> None:
         belief_subject = "legitimacy_form"
     elif event.event_type in {"PLAYER_MIRACLE"}:
         belief_subject = "miracle_credibility"
-    elif event.event_type in {"WAR_DECLARED", "WAR_SKIRMISH"}:
+    elif event.event_type in {"WAR_DECLARED", "WAR_SKIRMISH", "WAR_SUPPLY_SECURED", "WAR_COMMAND_MUSTERED"}:
         belief_subject = "destiny"
+    elif event.event_type in {"WAR_SUPPLY_SHORTFALL", "WAR_COMMAND_DIVERTED"}:
+        belief_subject = "legitimacy_form"
     packet_id = emit_info_packet(
         world,
         source_event_id=event.id,
@@ -201,8 +205,10 @@ def _convert_memories(world: WorldState) -> None:
             belief_domain = "legitimacy_form"
         elif source_event.event_type in {"PLAYER_MIRACLE"}:
             belief_domain = "miracle_credibility"
-        elif source_event.event_type in {"WAR_DECLARED", "WAR_SKIRMISH"}:
+        elif source_event.event_type in {"WAR_DECLARED", "WAR_SKIRMISH", "WAR_SUPPLY_SECURED", "WAR_COMMAND_MUSTERED"}:
             belief_domain = "destiny"
+        elif source_event.event_type in {"WAR_SUPPLY_SHORTFALL", "WAR_COMMAND_DIVERTED"}:
+            belief_domain = "legitimacy_form"
         else:
             belief_domain = None
         if belief_domain:
@@ -298,6 +304,98 @@ def _materialize_war_changes(world: WorldState) -> None:
         world.events[event_id] = event
         events_by_step.setdefault(world.current_step, []).append(event_id)
         event_layers[HistoricalLayer.CIVILIZATION_NODE.value].append(event_id)
+        _derive_packets(world, event)
+        entry["materialized"] = True
+
+
+def _materialize_war_supply(world: WorldState) -> None:
+    war_supply_log: list[dict[str, object]] = world.history_index["war_supply_log"]  # type: ignore[assignment]
+    events_by_step: dict[int, list[str]] = world.history_index["events_by_step"]  # type: ignore[assignment]
+    event_layers: dict[str, list[str]] = world.history_index["event_layers"]  # type: ignore[assignment]
+    for entry in war_supply_log:
+        if entry.get("step") != world.current_step or entry.get("materialized"):
+            continue
+        if entry.get("kind") != "supply_result":
+            continue
+        polity_id = str(entry["polity_id"])
+        polity = world.polities.get(polity_id) or world.archived_polities.get(polity_id)
+        if polity is None:
+            entry["materialized"] = True
+            continue
+        supply_ratio = float(entry.get("supply_ratio") or 0.0)
+        event_type = "WAR_SUPPLY_SECURED" if supply_ratio >= 0.95 else "WAR_SUPPLY_SHORTFALL"
+        event_id = world.next_id("event")
+        capital = world.settlements.get(polity.capital_settlement_id)
+        importance = 58.0 if supply_ratio >= 0.95 else 72.0
+        event = Event(
+            id=event_id,
+            event_type=event_type,
+            timestamp_step=world.current_step,
+            location_tile_id=capital.core_tile_id if capital else None,
+            region_ref=None,
+            participant_ids=[polity.ruler_npc_id] if polity.ruler_npc_id in world.npcs else [],
+            cause_refs=[str(entry["war_id"]), polity_id, str(entry["settlement_id"])],
+            outcome_summary_code=f"ratio={entry['supply_ratio']}:value={entry['drawn_value']}",
+            importance=importance,
+            visibility_scope="local" if supply_ratio >= 0.95 else "broad",
+            derived_memory_ids=[],
+            derived_modifier_ids=[],
+            derived_info_packet_ids=[],
+        )
+        world.events[event_id] = event
+        events_by_step.setdefault(world.current_step, []).append(event_id)
+        event_layers[
+            HistoricalLayer.LOCAL_CHRONICLE.value if supply_ratio >= 0.95 else HistoricalLayer.CIVILIZATION_NODE.value
+        ].append(event_id)
+        _derive_memories(world, event)
+        _derive_packets(world, event)
+        entry["materialized"] = True
+
+
+def _materialize_war_command_changes(world: WorldState) -> None:
+    war_command_log: list[dict[str, object]] = world.history_index["war_command_log"]  # type: ignore[assignment]
+    events_by_step: dict[int, list[str]] = world.history_index["events_by_step"]  # type: ignore[assignment]
+    event_layers: dict[str, list[str]] = world.history_index["event_layers"]  # type: ignore[assignment]
+    for entry in war_command_log:
+        if entry.get("step") != world.current_step or entry.get("materialized"):
+            continue
+        polity_id = str(entry["polity_id"])
+        polity = world.polities.get(polity_id) or world.archived_polities.get(polity_id)
+        settlement = world.settlements.get(str(entry["settlement_id"])) or world.archived_settlements.get(str(entry["settlement_id"]))
+        if polity is None:
+            entry["materialized"] = True
+            continue
+        command_subject = str(entry["command_subject"])
+        support_delta = float(entry.get("support_delta") or 0.0)
+        if command_subject == "muster_force":
+            event_type = "WAR_COMMAND_MUSTERED"
+            importance = 58.0
+        elif support_delta < 0.0:
+            event_type = "WAR_COMMAND_DIVERTED"
+            importance = 60.0
+        else:
+            event_type = "WAR_COMMAND_ROUTED"
+            importance = 50.0
+        event_id = world.next_id("event")
+        event = Event(
+            id=event_id,
+            event_type=event_type,
+            timestamp_step=world.current_step,
+            location_tile_id=getattr(settlement, "core_tile_id", None),
+            region_ref=None,
+            participant_ids=[polity.ruler_npc_id] if polity.ruler_npc_id in world.npcs else [],
+            cause_refs=[str(entry["war_id"]), polity_id, command_subject],
+            outcome_summary_code=f"support={entry['support_delta']}:burden={entry['local_burden_delta']}",
+            importance=importance,
+            visibility_scope="local",
+            derived_memory_ids=[],
+            derived_modifier_ids=[],
+            derived_info_packet_ids=[],
+        )
+        world.events[event_id] = event
+        events_by_step.setdefault(world.current_step, []).append(event_id)
+        event_layers[HistoricalLayer.LOCAL_CHRONICLE.value].append(event_id)
+        _derive_memories(world, event)
         _derive_packets(world, event)
         entry["materialized"] = True
 

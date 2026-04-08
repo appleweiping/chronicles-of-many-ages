@@ -151,6 +151,8 @@ class BalanceParameters:
             "repression": {"fear": 16.0, "grievance": 14.0},
             "good_governance": {"trust": 6.0, "affinity": 4.0},
             "extractive_taxation": {"grievance": 10.0, "affinity": -5.0},
+            "war_burden": {"grievance": 9.0, "fear": 5.0, "affinity": -3.0},
+            "wartime_solidarity": {"trust": 5.0, "familiarity": 4.0, "affinity": 2.0},
         }
     )
     path_costs: dict[TerrainType, float] = field(

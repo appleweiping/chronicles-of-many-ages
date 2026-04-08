@@ -1763,7 +1763,7 @@ def _execute_command_chain(world: WorldState) -> None:
                     }
                 )
                 for npc_id in local_executors[:3]:
-                    apply_relation_template_between(world, npc_id, polity.ruler_npc_id, "repression")
+                    apply_relation_template_between(world, npc_id, polity.ruler_npc_id, "war_burden")
                 outcome = "softened" if mode == "soften" else "executed"
             elif command_subject == "suppress_unrest":
                 security_gain = 10.0 * compliance
@@ -1982,7 +1982,7 @@ def _update_war_states(world: WorldState) -> None:
                     }
                 )
                 for resident_id in settlement.resident_npc_ids[:2]:
-                    apply_relation_template_between(world, resident_id, polity.ruler_npc_id, "extractive_taxation", scale=0.5)
+                    apply_relation_template_between(world, resident_id, polity.ruler_npc_id, "war_burden", scale=0.5)
             treasury_bundle = _draw_bundle_from_stock(polity.treasury, remaining_bundle)
             for resource, amount in treasury_bundle.items():
                 supplied_bundle[resource] += amount
@@ -2036,6 +2036,16 @@ def _update_war_states(world: WorldState) -> None:
                         "delta": 0.8,
                     }
                 )
+                capital_settlement = world.settlements.get(polity.capital_settlement_id)
+                if capital_settlement is not None:
+                    for resident_id in capital_settlement.resident_npc_ids[:2]:
+                        apply_relation_template_between(
+                            world,
+                            resident_id,
+                            polity.ruler_npc_id,
+                            "wartime_solidarity",
+                            scale=0.45,
+                        )
             resource_flow_log.append(
                 {
                     "step": world.current_step,
