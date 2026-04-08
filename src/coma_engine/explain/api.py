@@ -21,6 +21,27 @@ def _trend_label(value: float) -> str:
     return "low"
 
 
+def _player_knows_ref(world: WorldState, ref: str | None) -> bool:
+    return ref is not None and ref in world.player_state.known_entities
+
+
+def _ensure_player_bootstrap(world: WorldState) -> None:
+    if world.player_state.known_entities or not world.settlements:
+        return
+    anchor = world.settlements[sorted(world.settlements)[0]]
+    world.player_state.known_entities.add(anchor.id)
+    world.player_state.known_regions.add(anchor.core_tile_id)
+    if anchor.faction_id:
+        world.player_state.known_entities.add(anchor.faction_id)
+    if anchor.polity_id:
+        world.player_state.known_entities.add(anchor.polity_id)
+    for npc_id in anchor.resident_npc_ids[:4]:
+        world.player_state.known_entities.add(npc_id)
+    world.player_state.visibility_level = world.clamp_metric(
+        len(world.player_state.known_entities) * 3.0 + len(world.player_state.known_regions) * 2.0
+    )
+
+
 def debug_grade_action_explanations(world: WorldState, step: int) -> dict[str, dict[str, float]]:
     explanations = world.history_index["action_explanations"]  # type: ignore[index]
     return explanations.get(step, {})  # type: ignore[return-value]
@@ -52,6 +73,14 @@ def debug_grade_step_report(world: WorldState, step: int) -> list[str]:
         lines.append(
             "legitimacy:"
             f"{entry.get('polity_id')}:{entry.get('kind')}:delta={entry.get('delta')}"
+        )
+    legitimacy_source_log: list[dict[str, object]] = world.history_index["legitimacy_source_log"]  # type: ignore[assignment]
+    for entry in legitimacy_source_log[-5:]:
+        lines.append(
+            "legitimacy_source:"
+            f"{entry.get('polity_id')}:support={entry.get('support')}:"
+            f"civil_order={entry.get('civil_order')}:war_strain={entry.get('war_strain')}:"
+            f"reach={entry.get('reach')}:network={entry.get('network')}:total={entry.get('total')}"
         )
     demographic_log: list[dict[str, object]] = world.history_index["demographic_log"]  # type: ignore[assignment]
     for entry in demographic_log[-5:]:
@@ -158,14 +187,27 @@ def debug_grade_step_report(world: WorldState, step: int) -> list[str]:
 
 
 def player_grade_recent_history(world: WorldState, limit: int = 5) -> list[str]:
+    _ensure_player_bootstrap(world)
     recent_events = sorted(world.events.values(), key=lambda event: (event.timestamp_step, event.id), reverse=True)
     return [
         f"Step {event.timestamp_step}: {event.event_type} ({event.outcome_summary_code})"
-        for event in recent_events[:limit]
-    ]
+        for event in recent_events
+        if event.visibility_scope == "broad" or event.location_tile_id in world.player_state.known_regions
+    ][:limit]
+
+
+def player_grade_known_entities(world: WorldState, limit: int = 12) -> list[str]:
+    _ensure_player_bootstrap(world)
+    known = sorted(world.player_state.known_entities)
+    preview = known[:limit]
+    lines = [f"known_entities={len(known)} known_regions={len(world.player_state.known_regions)} visibility={_trend_label(world.player_state.visibility_level)}"]
+    if preview:
+        lines.append("entities=" + ", ".join(preview))
+    return lines
 
 
 def player_grade_world_summary(world: WorldState) -> list[str]:
+    _ensure_player_bootstrap(world)
     return [
         f"Step: {world.current_step}",
         f"Active settlements: {len(world.settlements)}",
@@ -176,11 +218,19 @@ def player_grade_world_summary(world: WorldState) -> list[str]:
         f"Archived polities: {len(world.archived_polities)}",
         f"Active wars: {len([war for war in world.war_states.values() if war.status == 'active'])}",
         f"Events: {len(world.events)}",
+        f"Player visibility: {_trend_label(world.player_state.visibility_level)} known_entities={len(world.player_state.known_entities)}",
     ]
 
 
 def player_grade_npc_summary(world: WorldState, npc_id: str) -> list[str]:
+    _ensure_player_bootstrap(world)
     npc = world.npcs[npc_id]
+    if not _player_knows_ref(world, npc_id):
+        return [
+            f"{npc.id} {npc.name}",
+            "visibility=unknown",
+            "details hidden until learned through events, nearby history, or interventions",
+        ]
     return [
         f"{npc.id} {npc.name}",
         f"role={npc.role} tile={npc.location_tile_id}",
@@ -191,9 +241,16 @@ def player_grade_npc_summary(world: WorldState, npc_id: str) -> list[str]:
 
 
 def player_grade_settlement_summary(world: WorldState, settlement_id: str) -> list[str]:
+    _ensure_player_bootstrap(world)
     settlement = world.entity_by_ref(settlement_id)
     if settlement is None:
         return [f"{settlement_id} not found"]
+    if not _player_knows_ref(world, settlement_id):
+        return [
+            f"{settlement.id} {settlement.name}",
+            "visibility=rumored",
+            "only existence is currently known to the player layer",
+        ]
     resident_count = len(getattr(settlement, "resident_npc_ids", []))
     return [
         f"{settlement.id} {settlement.name}",
@@ -205,9 +262,16 @@ def player_grade_settlement_summary(world: WorldState, settlement_id: str) -> li
 
 
 def player_grade_polity_summary(world: WorldState, polity_id: str) -> list[str]:
+    _ensure_player_bootstrap(world)
     polity = world.entity_by_ref(polity_id)
     if polity is None:
         return [f"{polity_id} not found"]
+    if not _player_knows_ref(world, polity_id):
+        return [
+            f"{polity.id} {polity.name}",
+            "visibility=rumored",
+            "internal legitimacy and treasury details remain hidden at the player layer",
+        ]
     legitimacy = polity.legitimacy_components
     return [
         f"{polity.id} {polity.name}",
@@ -215,4 +279,24 @@ def player_grade_polity_summary(world: WorldState, polity_id: str) -> list[str]:
         f"stability={_trend_label(polity.stability)} reach={_trend_label(polity.administrative_reach)} war_readiness={_trend_label(polity.war_readiness)}",
         f"legitimacy_support={_trend_label(legitimacy.get('support', 0.0))} civil_order={_trend_label(legitimacy.get('civil_order', 50.0))}",
         f"treasury_food={_trend_label(polity.treasury.get('food', 0.0))} treasury_wealth={_trend_label(polity.treasury.get('wealth', 0.0))} network_integrity={_trend_label(polity.command_network_state.get('integrity', 0.0))}",
+    ]
+
+
+def player_grade_war_summary(world: WorldState, war_id: str) -> list[str]:
+    _ensure_player_bootstrap(world)
+    war = world.war_states.get(war_id)
+    if war is None:
+        return [f"{war_id} not found"]
+    known_participants = [polity_id for polity_id in war.participant_polity_ids if _player_knows_ref(world, polity_id)]
+    if not known_participants:
+        return [
+            f"{war.id}",
+            "visibility=rumored",
+            "a conflict is known to exist, but participants and support levels remain hidden",
+        ]
+    return [
+        f"{war.id} participants={known_participants} status={war.status}",
+        f"front_pressure={_trend_label(war.effective_front_pressure)} escalation={_trend_label(war.escalation_risk)}",
+        f"support={{{', '.join(f'{pid}:{_trend_label(war.war_support_levels.get(pid, 0.0))}' for pid in known_participants)}}}",
+        f"fatigue={{{', '.join(f'{pid}:{_trend_label(war.war_fatigue_levels.get(pid, 0.0))}' for pid in known_participants)}}}",
     ]

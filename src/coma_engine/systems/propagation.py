@@ -85,6 +85,7 @@ def _deliver_packet_to_npc(world: WorldState, npc: NPC, packet: InfoPacket) -> N
     expires = world.current_step + world.config.balance_parameters.default_perception_ttl
     capacity = world.config.balance_parameters.perception_channel_capacity
     state = npc.perceived_state
+    source_event = world.events.get(packet.source_event_id) if packet.source_event_id else None
     if packet.content_domain in {"war", "threat", "command"}:
         _append_capped(
             state.perceived_threats,
@@ -152,11 +153,14 @@ def _deliver_packet_to_npc(world: WorldState, npc: NPC, packet: InfoPacket) -> N
             capacity,
         )
     else:
+        summary_code = packet.content_domain
+        if source_event is not None:
+            summary_code = source_event.event_type
         _append_capped(
             state.perceived_recent_events,
             RecentEventPerception(
                 event_id=packet.source_event_id or packet.id,
-                summary_code=packet.content_domain,
+                summary_code=summary_code,
                 importance=packet.strength,
                 source_ref=packet.id,
                 credibility=1.0 - packet.distortion,

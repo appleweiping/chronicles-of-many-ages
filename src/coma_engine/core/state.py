@@ -60,6 +60,7 @@ class WorldState:
             "demographic_log": [],
             "war_log": [],
             "legitimacy_log": [],
+            "legitimacy_source_log": [],
             "relation_log": [],
             "belief_log": [],
             "memory_conversion_log": [],

@@ -686,6 +686,14 @@ def _perceived_recent_event_score(npc, summary_code: str) -> float:
     return total
 
 
+def _perceived_relation_shift_score(npc, summary_code: str) -> float:
+    total = 0.0
+    for entry in npc.perceived_state.perceived_relations_shift:
+        if entry.summary_code == summary_code:
+            total += entry.delta_strength * entry.credibility
+    return total
+
+
 def _score_action(world: WorldState, npc_id: str, action_type: str, target_ref: str | None) -> dict[str, float]:
     npc = world.npcs[npc_id]
     local_polity_conflict = 0.0
@@ -739,10 +747,20 @@ def _score_action(world: WorldState, npc_id: str, action_type: str, target_ref: 
     elif action_type == "FORMAL_TAX_ORDER":
         scores["goal_progress"] = 24.0
         scores["organization_conflict_cost"] = 10.0
+        scores["belief_consistency"] = _perceived_belief_score(npc, "legitimacy_form") * 0.06
+        scores["risk_penalty"] = (
+            _perceived_recent_event_score(npc, "COMMAND_RESISTED") * 0.08
+            + _perceived_recent_event_score(npc, "WAR_SUPPLY_SHORTFALL") * 0.05
+            + _perceived_relation_shift_score(npc, "war_burden") * 0.04
+        )
     elif action_type == "LEVY_RESOURCES":
         scores["goal_progress"] = 20.0
         scores["organization_conflict_cost"] = 14.0
-        scores["risk_penalty"] = 6.0
+        scores["risk_penalty"] = 6.0 + (
+            _perceived_recent_event_score(npc, "COMMAND_RESISTED") * 0.1
+            + _perceived_recent_event_score(npc, "WAR_SUPPLY_SHORTFALL") * 0.08
+            + _perceived_relation_shift_score(npc, "war_burden") * 0.05
+        )
     elif action_type == "ALLOCATE_RESOURCES" and target_ref and target_ref in world.settlements and npc.polity_id:
         settlement = world.settlements[target_ref]
         scarcity = (
@@ -754,19 +772,37 @@ def _score_action(world: WorldState, npc_id: str, action_type: str, target_ref: 
             war.status == "active" and npc.polity_id in war.participant_polity_ids
             for war in world.war_states.values()
         )
-        scores["goal_progress"] = 10.0 + scarcity * 1.8 + (8.0 if at_war else 0.0)
+        scores["goal_progress"] = (
+            10.0
+            + scarcity * 1.8
+            + (8.0 if at_war else 0.0)
+            + _perceived_recent_event_score(npc, "WAR_SUPPLY_SHORTFALL") * 0.12
+            + _perceived_recent_event_score(npc, "COMMAND_RESISTED") * 0.05
+            + _perceived_relation_shift_score(npc, "war_burden") * 0.08
+        )
         scores["organization_conflict_cost"] = 6.0
         scores["resource_cost"] = 3.0
         scores["belief_consistency"] = npc.beliefs.get("legitimacy_form", 0.0) * 0.1
     elif action_type == "DECLARE_WAR":
         scores["goal_progress"] = 18.0
-        scores["risk_penalty"] = 30.0
+        scores["risk_penalty"] = 30.0 + _perceived_recent_event_score(npc, "WAR_SUPPLY_SHORTFALL") * 0.06
+        scores["belief_consistency"] = npc.beliefs.get("destiny", 0.0) * 0.12
     elif action_type == "MUSTER_FORCE":
-        scores["goal_progress"] = 26.0
+        scores["goal_progress"] = 26.0 + _perceived_belief_score(npc, "destiny") * 0.08
         scores["organization_conflict_cost"] = 18.0
         scores["resource_cost"] = 8.0
+        scores["risk_penalty"] = (
+            _perceived_recent_event_score(npc, "WAR_SUPPLY_SHORTFALL") * 0.12
+            + _perceived_recent_event_score(npc, "COMMAND_RESISTED") * 0.06
+            + _perceived_relation_shift_score(npc, "war_burden") * 0.06
+        )
     elif action_type == "SUPPRESS_UNREST":
-        scores["goal_progress"] = 20.0 + npc.needs["safety"] * 0.2
+        scores["goal_progress"] = (
+            20.0
+            + npc.needs["safety"] * 0.2
+            + _perceived_recent_event_score(npc, "COMMAND_RESISTED") * 0.1
+            + _perceived_relation_shift_score(npc, "repression") * 0.04
+        )
         scores["organization_conflict_cost"] = 12.0
         scores["risk_penalty"] = 5.0
         scores["belief_consistency"] = npc.beliefs.get("legitimacy_form", 0.0) * 0.08
@@ -1301,9 +1337,35 @@ def run_political_phase(snapshot: WorldState, working: WorldState) -> None:
     _update_settlement_hysteresis(working)
     _update_faction_hysteresis(working)
     _update_polity_hysteresis(working)
+    _record_legitimacy_sources(working)
     reconcile_references(working)
     for error in validate_reference_consistency(working):
         working.log_error(error)
+
+
+def _record_legitimacy_sources(world: WorldState) -> None:
+    legitimacy_source_log: list[dict[str, object]] = world.history_index["legitimacy_source_log"]  # type: ignore[assignment]
+    for polity in world.polities.values():
+        support = polity.legitimacy_components.get("support", 0.0)
+        cohesion = polity.legitimacy_components.get("cohesion", 0.0)
+        civil_order = polity.legitimacy_components.get("civil_order", 50.0)
+        war_strain = polity.legitimacy_components.get("war_strain", 0.0)
+        reach = polity.administrative_reach
+        network = polity.command_network_state.get("integrity", 0.0)
+        total = support * 0.25 + cohesion * 0.2 + civil_order * 0.25 + reach * 0.15 + network * 0.15 - war_strain * 0.2
+        legitimacy_source_log.append(
+            {
+                "step": world.current_step,
+                "polity_id": polity.id,
+                "support": round(support, 2),
+                "cohesion": round(cohesion, 2),
+                "civil_order": round(civil_order, 2),
+                "war_strain": round(war_strain, 2),
+                "reach": round(reach, 2),
+                "network": round(network, 2),
+                "total": round(total, 2),
+            }
+        )
 
 
 def _archive_settlement(world: WorldState, settlement_id: str) -> None:
@@ -2246,6 +2308,7 @@ def _update_polity_hysteresis(world: WorldState) -> None:
 def run_event_phase(snapshot: WorldState, working: WorldState) -> None:
     materialize_outcomes(working)
     _update_objectives(working)
+    _refresh_player_knowledge(working)
 
 
 def _update_objectives(world: WorldState) -> None:
@@ -2258,6 +2321,58 @@ def _update_objectives(world: WorldState) -> None:
         objective.maintained_steps = objective.maintained_steps + 1 if objective.completed else 0
         if any(condition == "no_polity" and not world.polities for condition in objective.failure_conditions):
             objective.failed = True
+
+
+def _register_player_ref(world: WorldState, ref: str | None) -> None:
+    if not ref:
+        return
+    entity = world.entity_by_ref(ref)
+    if entity is None:
+        return
+    world.player_state.known_entities.add(ref)
+    if ref.startswith("settlement:"):
+        settlement = world.entity_by_ref(ref)
+        if settlement is not None:
+            world.player_state.known_regions.add(settlement.core_tile_id)
+    elif ref.startswith("tile:"):
+        world.player_state.known_regions.add(ref)
+
+
+def _bootstrap_player_knowledge(world: WorldState) -> None:
+    if world.player_state.known_entities or not world.settlements:
+        return
+    anchor = world.settlements[sorted(world.settlements)[0]]
+    _register_player_ref(world, anchor.id)
+    _register_player_ref(world, anchor.core_tile_id)
+    if anchor.faction_id:
+        _register_player_ref(world, anchor.faction_id)
+    if anchor.polity_id:
+        _register_player_ref(world, anchor.polity_id)
+    for npc_id in anchor.resident_npc_ids[:4]:
+        _register_player_ref(world, npc_id)
+
+
+def _refresh_player_knowledge(world: WorldState) -> None:
+    _bootstrap_player_knowledge(world)
+    for event in world.events.values():
+        if event.timestamp_step != world.current_step:
+            continue
+        if event.visibility_scope == "broad":
+            _register_player_ref(world, event.location_tile_id)
+            for ref in event.participant_ids + event.cause_refs:
+                _register_player_ref(world, ref)
+        elif event.location_tile_id in world.player_state.known_regions:
+            _register_player_ref(world, event.location_tile_id)
+            for ref in event.participant_ids + event.cause_refs:
+                _register_player_ref(world, ref)
+    for record in world.player_state.intervention_history[-8:]:
+        parts = record.split(":")
+        for index in range(1, len(parts) - 1):
+            candidate = f"{parts[index]}:{parts[index + 1]}"
+            _register_player_ref(world, candidate)
+    world.player_state.visibility_level = world.clamp_metric(
+        len(world.player_state.known_entities) * 3.0 + len(world.player_state.known_regions) * 2.0
+    )
 
 
 def _activate_delayed_effects(world: WorldState) -> None:

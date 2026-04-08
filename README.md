@@ -46,10 +46,11 @@ This repository implements the first-pass formal systems foundation described in
 - Relation templates now enter execution outcomes and command-chain consequences, including war burden and wartime solidarity feedback
 - War supply and war command logs now materialize into formal events, memories, and belief packets instead of remaining debug-only traces
 - Memory conversion now feeds back into formal belief-signal propagation instead of disappearing as dead data
+- Debug/player explain surfaces now expose command-side effects, resource-flow traces, war-command traces, war-supply traces, legitimacy-source mixes, and higher-level settlement/polity summaries
+- Player-facing summaries now maintain a minimal knowledge boundary, so unknown entities can remain rumored while known entities expose richer summaries
 - Formal player intervention queue restricted to approved channels
-- Debug/player explain surfaces now expose command-side effects, resource-flow traces, war-command traces, war-supply traces, and higher-level settlement/polity summaries
 - Core invariant tests for replayability, reference consistency, political gating, phase snapshots, action interruption, and command-chain delay
-- Additional invariant tests for local skimming, archive-safe mirror cleanup, war-loot remittance, war-belief propagation, and resource-chain explainability
+- Additional invariant tests for local skimming, archive-safe mirror cleanup, war-loot remittance, war-belief propagation, perception specificity, player knowledge gating, and resource-chain explainability
 
 ## Quick start
 
@@ -74,6 +75,7 @@ Interactive shell commands:
 
 - `step`: advance one simulation step
 - `map`: print a compact terrain and settlement map
+- `known`: print currently known entities and regions at the player layer
 - `npc <npc_id>`: inspect one NPC summary
 - `settlement <settlement_id>`: inspect one settlement summary
 - `polity <polity_id>`: inspect one polity summary

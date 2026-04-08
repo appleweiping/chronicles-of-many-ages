@@ -22,16 +22,18 @@ from coma_engine.core.transfers import (
 from coma_engine.explain import (
     debug_grade_action_explanations,
     debug_grade_step_report,
+    player_grade_known_entities,
     player_grade_npc_summary,
     player_grade_polity_summary,
     player_grade_settlement_summary,
+    player_grade_war_summary,
 )
 from coma_engine.models.entities import Event, Faction, MemoryEntry, RelationEntry, Settlement
 from coma_engine.player.interventions import queue_information_intervention, queue_npc_modifier_intervention
 from coma_engine.simulation.engine import SimulationEngine
 from coma_engine.simulation.phases import _declare_war, _found_polity, run_event_phase, run_political_phase, run_resolution_phase, run_resource_phase
 from coma_engine.systems.generation import create_world
-from coma_engine.systems.propagation import emit_command_packet
+from coma_engine.systems.propagation import emit_command_packet, emit_info_packet, propagate_info_packets
 
 
 class CoreInvariantTests(unittest.TestCase):
@@ -928,6 +930,63 @@ class CoreInvariantTests(unittest.TestCase):
             any(packet.content_domain == "belief" and packet.subject_ref in {"destiny", "legitimacy_form"} for packet in world.info_packets)
         )
         self.assertTrue(world.history_index["memory_conversion_log"])
+
+    def test_event_packets_preserve_specific_event_type_in_perception(self) -> None:
+        world = create_world(default_config(seed=67))
+        npc_id = next(iter(world.npcs))
+        event_id = world.next_id("event")
+        world.events[event_id] = Event(
+            id=event_id,
+            event_type="WAR_SUPPLY_SHORTFALL",
+            timestamp_step=world.current_step,
+            location_tile_id=world.npcs[npc_id].location_tile_id,
+            region_ref=None,
+            participant_ids=[npc_id],
+            cause_refs=["war:1"],
+            outcome_summary_code="ratio=0.3",
+            importance=72.0,
+            visibility_scope="local",
+            derived_memory_ids=[],
+            derived_modifier_ids=[],
+            derived_info_packet_ids=[],
+        )
+        emit_info_packet(
+            world,
+            source_event_id=event_id,
+            origin_actor_id=npc_id,
+            content_domain="event",
+            subject_ref="war:1",
+            location_ref=world.npcs[npc_id].location_tile_id,
+            strength=40.0,
+            visibility_scope="local",
+            ttl=3,
+            truth_alignment=1.0,
+            propagation_channels=["spatial"],
+        )
+        propagate_info_packets(world)
+        self.assertTrue(
+            any(entry.summary_code == "WAR_SUPPLY_SHORTFALL" for entry in world.npcs[npc_id].perceived_state.perceived_recent_events)
+        )
+
+    def test_debug_view_surfaces_legitimacy_source_mix(self) -> None:
+        world = create_world(default_config(seed=68))
+        leader = max(world.npcs.values(), key=lambda npc: npc.office_rank)
+        _found_polity(world, leader.id, leader.settlement_id)
+        run_political_phase(world.clone_for_phase(), world)
+        debug_lines = debug_grade_step_report(world, world.current_step)
+        self.assertTrue(any(line.startswith("legitimacy_source:") for line in debug_lines))
+
+    def test_player_knowledge_gates_unknown_entity_details(self) -> None:
+        world = create_world(default_config(seed=69))
+        leader = max(world.npcs.values(), key=lambda npc: npc.office_rank)
+        _found_polity(world, leader.id, leader.settlement_id)
+        polity_id = next(iter(world.polities))
+        run_event_phase(world.clone_for_phase(), world)
+        world.player_state.known_entities.discard(polity_id)
+        lines = player_grade_polity_summary(world, polity_id)
+        known_lines = player_grade_known_entities(world)
+        self.assertTrue(any("visibility=rumored" in line for line in lines))
+        self.assertTrue(any(line.startswith("known_entities=") for line in known_lines))
 
 
 if __name__ == "__main__":
