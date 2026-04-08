@@ -213,6 +213,82 @@ class CoreInvariantTests(unittest.TestCase):
             any(entry["kind"] == "skimming" for entry in world.history_index["command_consequence_log"])
         )
 
+    def test_allocate_resources_action_moves_treasury_to_settlement(self) -> None:
+        world = create_world(default_config(seed=40))
+        leader = max(world.npcs.values(), key=lambda npc: npc.office_rank)
+        _found_polity(world, leader.id, leader.settlement_id)
+        polity_id = next(iter(world.polities))
+        polity = world.polities[polity_id]
+        settlement = world.settlements[leader.settlement_id]
+        local_executor_id = next(npc_id for npc_id in settlement.resident_npc_ids if npc_id != leader.id)
+        polity.treasury.update({"food": 14.0, "wood": 6.0, "ore": 3.0, "wealth": 2.0})
+        settlement.stored_resources.update({"food": 2.0, "wood": 0.5, "ore": 0.0, "wealth": 0.0})
+        world.action_queue.append(
+            Action(
+                id=world.next_id("action"),
+                action_type="ALLOCATE_RESOURCES",
+                actor_id=leader.id,
+                target_npc_id=None,
+                target_tile_id=None,
+                target_settlement_id=settlement.id,
+                target_faction_id=None,
+                target_polity_id=None,
+                declared_step=world.current_step,
+                priority_class="civic",
+                duration_type="instant",
+                estimated_duration=1,
+                resource_cost={"food": 0.0, "wood": 0.0, "ore": 0.0, "wealth": 0.0},
+                risk_value=0.0,
+                availability_rule_id="allocate_resources",
+                resolution_group_key=f"ALLOCATE_RESOURCES:{settlement.id}",
+                status="declared",
+            )
+        )
+        before_food = settlement.stored_resources["food"]
+        before_treasury_food = polity.treasury["food"]
+        run_resolution_phase(world.clone_for_phase(), world)
+        packet_id = next(
+            packet.id
+            for packet in world.info_packets
+            if packet.content_domain == "command" and world.history_index["command_packet_subjects"].get(packet.id) == "resource_allocation"
+        )
+        world.history_index["packet_deliveries"][packet_id] = [local_executor_id]
+        run_political_phase(world.clone_for_phase(), world)
+        self.assertGreater(settlement.stored_resources["food"], before_food)
+        self.assertLess(polity.treasury["food"], before_treasury_food)
+        self.assertTrue(
+            any(entry["flow_type"] == "resource_allocation" for entry in world.history_index["resource_flow_log"])
+        )
+
+    def test_resource_allocation_skimming_can_divert_to_executor_inventory(self) -> None:
+        world = create_world(default_config(seed=41))
+        leader = max(world.npcs.values(), key=lambda npc: npc.office_rank)
+        _found_polity(world, leader.id, leader.settlement_id)
+        polity = next(iter(world.polities.values()))
+        settlement = world.settlements[leader.settlement_id]
+        local_executor_id = next(npc_id for npc_id in settlement.resident_npc_ids if npc_id != leader.id)
+        assign_npc_faction(world, local_executor_id, None)
+        world.npcs[local_executor_id].office_rank = 1
+        world.npcs[local_executor_id].relationships[leader.id] = RelationEntry(
+            trust=6.0, fear=10.0, grievance=34.0, familiarity=10.0
+        )
+        polity.treasury.update({"food": 14.0, "wood": 6.0, "ore": 3.0, "wealth": 2.0})
+        settlement.stored_resources.update({"food": 2.0, "wood": 0.5, "ore": 0.0, "wealth": 0.0})
+        before_inventory_food = world.npcs[local_executor_id].personal_inventory.get("food", 0.0)
+        packet_id = emit_command_packet(world, leader.id, settlement.id, "resource_allocation")
+        world.history_index["packet_deliveries"][packet_id] = [local_executor_id]
+        run_political_phase(world.clone_for_phase(), world)
+        self.assertGreater(world.npcs[local_executor_id].personal_inventory.get("food", 0.0), before_inventory_food)
+        self.assertTrue(
+            any(entry["kind"] == "allocation_diverted" for entry in world.history_index["command_consequence_log"])
+        )
+        self.assertTrue(
+            any(
+                entry["flow_type"] == "resource_allocation" and entry["diverted_value"] > 0.0
+                for entry in world.history_index["resource_flow_log"]
+            )
+        )
+
 
     def test_children_do_not_count_as_full_labor_pool(self) -> None:
         world = create_world(default_config(seed=41))

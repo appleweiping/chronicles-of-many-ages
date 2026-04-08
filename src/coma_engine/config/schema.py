@@ -122,6 +122,12 @@ class BalanceParameters:
     command_local_retention_stability_gain: float = 4.0
     command_compliance_civil_order_gain: float = 2.5
     command_resistance_integrity_penalty: float = 7.0
+    allocation_food_reserve_target: float = 12.0
+    allocation_wood_reserve_target: float = 4.0
+    allocation_ore_reserve_target: float = 2.0
+    allocation_dispatch_fraction: float = 0.8
+    allocation_stability_gain_scale: float = 0.35
+    allocation_security_gain_scale: float = 0.2
     loot_remittance_rate: float = 0.55
     relation_templates: dict[str, dict[str, float]] = field(
         default_factory=lambda: {

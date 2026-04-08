@@ -37,7 +37,7 @@ This repository implements the first-pass formal systems foundation described in
 - Event materialization from action outcomes with derived memories and info packets
 - Formal command packets with delivery, delay, distortion, resistance, and execution records
 - Local command translation with compliance, softening, resistance, and skimming outcomes
-- Resource-flow tracing for tax base, command remittance, local retention, muster costs, and war-loot remittance
+- Resource-flow tracing for tax base, command remittance, local retention, formal resource allocation, muster costs, and war-loot remittance
 - Persistent archives for dissolved settlements, factions, and polities so history references remain valid
 - Active organization mirrors are cleaned on archive while archived objects remain resolvable for history/debug use
 - First-pass continuous-action semantics for partial progress, interruption, and outcome recording

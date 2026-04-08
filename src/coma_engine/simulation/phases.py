@@ -109,6 +109,32 @@ def _rounded_bundle(bundle: dict[str, float]) -> dict[str, float]:
     return {resource: round(amount, 2) for resource, amount in bundle.items()}
 
 
+def _desired_allocation_bundle(world: WorldState, polity: Polity, settlement: Settlement, compliance: float) -> dict[str, float]:
+    params = world.config.balance_parameters
+    active_war = any(
+        war.status == "active" and polity.id in war.participant_polity_ids
+        for war in world.war_states.values()
+    )
+    desired = {
+        "food": max(0.0, params.allocation_food_reserve_target - settlement.stored_resources.get("food", 0.0)),
+        "wood": max(0.0, params.allocation_wood_reserve_target - settlement.stored_resources.get("wood", 0.0)),
+        "ore": max(0.0, params.allocation_ore_reserve_target - settlement.stored_resources.get("ore", 0.0)),
+        "wealth": 0.0,
+    }
+    if active_war:
+        desired["food"] += 2.0
+        desired["wood"] += 1.0
+        desired["ore"] += 0.5
+    bundle: dict[str, float] = {}
+    for resource, amount in desired.items():
+        if amount <= 0.0:
+            bundle[resource] = 0.0
+            continue
+        dispatch_cap = polity.treasury.get(resource, 0.0) * params.allocation_dispatch_fraction
+        bundle[resource] = min(polity.treasury.get(resource, 0.0), dispatch_cap, amount * max(0.35, compliance))
+    return bundle
+
+
 def _executor_alignment_score(world: WorldState, executor_id: str, polity: Polity, settlement: Settlement) -> float:
     executor = world.npcs[executor_id]
     relation = executor.relationships.get(polity.ruler_npc_id, RelationEntry())
@@ -520,6 +546,14 @@ def _availability_decision(world: WorldState, npc_id: str, action_type: str, tar
             and world.settlements[target_ref].polity_id == npc.polity_id
         )
         return AvailabilityDecision(allowed, "resource_levy" if allowed else "resource_levy_unavailable")
+    if action_type == "ALLOCATE_RESOURCES":
+        allowed = (
+            npc.polity_id is not None
+            and npc.office_rank >= world.config.balance_parameters.low_rank_high_politics_gate_rank
+            and target_ref in world.settlements
+            and world.settlements[target_ref].polity_id == npc.polity_id
+        )
+        return AvailabilityDecision(allowed, "allocate_resources" if allowed else "allocate_resources_unavailable")
     if action_type == "MUSTER_FORCE":
         allowed = (
             npc.polity_id is not None
@@ -575,6 +609,8 @@ def _action_resource_cost(action_type: str) -> dict[str, float]:
         return {"food": 0.8, "wood": 0.2, "ore": 0.0, "wealth": 0.8}
     if action_type in {"FORMAL_TAX_ORDER", "LEVY_RESOURCES"}:
         return {"food": 0.0, "wood": 0.0, "ore": 0.0, "wealth": 0.2}
+    if action_type == "ALLOCATE_RESOURCES":
+        return {"food": 0.0, "wood": 0.0, "ore": 0.0, "wealth": 0.0}
     if action_type == "DECLARE_WAR":
         return {"food": 0.5, "wood": 0.0, "ore": 0.0, "wealth": 1.0}
     if action_type == "MUSTER_FORCE":
@@ -675,6 +711,21 @@ def _score_action(world: WorldState, npc_id: str, action_type: str, target_ref: 
         scores["goal_progress"] = 20.0
         scores["organization_conflict_cost"] = 14.0
         scores["risk_penalty"] = 6.0
+    elif action_type == "ALLOCATE_RESOURCES" and target_ref and target_ref in world.settlements and npc.polity_id:
+        settlement = world.settlements[target_ref]
+        scarcity = (
+            max(0.0, world.config.balance_parameters.allocation_food_reserve_target - settlement.stored_resources.get("food", 0.0))
+            + max(0.0, world.config.balance_parameters.allocation_wood_reserve_target - settlement.stored_resources.get("wood", 0.0))
+            + max(0.0, world.config.balance_parameters.allocation_ore_reserve_target - settlement.stored_resources.get("ore", 0.0))
+        )
+        at_war = any(
+            war.status == "active" and npc.polity_id in war.participant_polity_ids
+            for war in world.war_states.values()
+        )
+        scores["goal_progress"] = 10.0 + scarcity * 1.8 + (8.0 if at_war else 0.0)
+        scores["organization_conflict_cost"] = 6.0
+        scores["resource_cost"] = 3.0
+        scores["belief_consistency"] = npc.beliefs.get("legitimacy_form", 0.0) * 0.1
     elif action_type == "DECLARE_WAR":
         scores["goal_progress"] = 18.0
         scores["risk_penalty"] = 30.0
@@ -742,6 +793,7 @@ def run_decision_phase(snapshot: WorldState, working: WorldState) -> None:
             action_space.append(("FOUND_POLITY", npc.settlement_id))
             action_space.append(("FORMAL_TAX_ORDER", npc.settlement_id))
             action_space.append(("LEVY_RESOURCES", npc.settlement_id))
+            action_space.append(("ALLOCATE_RESOURCES", npc.settlement_id))
             action_space.append(("MUSTER_FORCE", npc.settlement_id))
             action_space.append(("SUPPRESS_UNREST", npc.settlement_id))
         if npc.polity_id:
@@ -1125,6 +1177,8 @@ def _apply_success(working: WorldState, action: Action) -> None:
         emit_command_packet(working, actor.id, action.target_settlement_id, "formal_tax_order")
     elif action.action_type == "LEVY_RESOURCES" and action.target_settlement_id:
         emit_command_packet(working, actor.id, action.target_settlement_id, "resource_levy")
+    elif action.action_type == "ALLOCATE_RESOURCES" and action.target_settlement_id:
+        emit_command_packet(working, actor.id, action.target_settlement_id, "resource_allocation")
     elif action.action_type == "DECLARE_WAR" and action.target_polity_id and actor.polity_id:
         _declare_war(working, actor.polity_id, action.target_polity_id)
     elif action.action_type == "MUSTER_FORCE" and action.target_settlement_id:
@@ -1501,6 +1555,100 @@ def _execute_command_chain(world: WorldState) -> None:
                         }
                     )
                 outcome = "executed_with_skimming" if skim_rate > 0.0 else "executed"
+            elif command_subject == "resource_allocation":
+                dispatch_bundle = _desired_allocation_bundle(world, polity, settlement, compliance)
+                if _bundle_value(dispatch_bundle) <= 0.0:
+                    outcome = "softened"
+                else:
+                    for resource, amount in dispatch_bundle.items():
+                        polity.treasury[resource] = max(0.0, polity.treasury.get(resource, 0.0) - amount)
+                    delivered_bundle = _scaled_bundle(dispatch_bundle, 1.0 - skim_rate)
+                    diverted_bundle = _scaled_bundle(dispatch_bundle, skim_rate)
+                    _merge_resource_bundle(settlement.stored_resources, delivered_bundle)
+                    _merge_resource_bundle(world.npcs[primary_executor_id].personal_inventory, diverted_bundle)
+                    delivery_value = _bundle_value(delivered_bundle)
+                    stability_delta = min(
+                        6.0,
+                        delivery_value * params.allocation_stability_gain_scale,
+                    )
+                    security_delta = min(
+                        4.0,
+                        delivery_value * params.allocation_security_gain_scale,
+                    )
+                    settlement.stability = world.clamp_metric(settlement.stability + stability_delta)
+                    settlement.security_level = world.clamp_metric(settlement.security_level + security_delta)
+                    resource_flow_log.append(
+                        {
+                            "step": world.current_step,
+                            "flow_type": "resource_allocation",
+                            "packet_id": packet.id,
+                            "settlement_id": settlement.id,
+                            "polity_id": polity.id,
+                            "command_subject": command_subject,
+                            "mode": mode,
+                            "sent_bundle": _rounded_bundle(dispatch_bundle),
+                            "delivered_bundle": _rounded_bundle(delivered_bundle),
+                            "diverted_bundle": _rounded_bundle(diverted_bundle),
+                            "sent_value": round(_bundle_value(dispatch_bundle), 2),
+                            "delivered_value": round(delivery_value, 2),
+                            "diverted_value": round(_bundle_value(diverted_bundle), 2),
+                        }
+                    )
+                    command_consequence_log.append(
+                        {
+                            "step": world.current_step,
+                            "packet_id": packet.id,
+                            "settlement_id": settlement.id,
+                            "polity_id": polity.id,
+                            "kind": "allocation_relief",
+                            "integrity_delta": 0.0,
+                            "civil_order_delta": round(1.0 + delivery_value * 0.15, 2),
+                            "settlement_stability_delta": round(stability_delta, 2),
+                        }
+                    )
+                    polity.legitimacy_components["civil_order"] = world.clamp_metric(
+                        polity.legitimacy_components.get("civil_order", 50.0) + 1.0 + delivery_value * 0.15
+                    )
+                    legitimacy_log.append(
+                        {
+                            "step": world.current_step,
+                            "polity_id": polity.id,
+                            "kind": "allocation_relief",
+                            "delta": round(1.0 + delivery_value * 0.15, 2),
+                        }
+                    )
+                    for npc_id in settlement.resident_npc_ids[:3]:
+                        apply_relation_template_between(world, npc_id, polity.ruler_npc_id, "good_governance")
+                    if skim_rate > 0.0:
+                        integrity_delta = -skim_rate * params.command_skimming_integrity_penalty * 0.8
+                        civil_order_delta = -skim_rate * params.command_skimming_civil_order_penalty * 0.6
+                        polity.command_network_state["integrity"] = world.clamp_metric(
+                            polity.command_network_state.get("integrity", 0.0) + integrity_delta
+                        )
+                        polity.legitimacy_components["civil_order"] = world.clamp_metric(
+                            polity.legitimacy_components.get("civil_order", 50.0) + civil_order_delta
+                        )
+                        command_consequence_log.append(
+                            {
+                                "step": world.current_step,
+                                "packet_id": packet.id,
+                                "settlement_id": settlement.id,
+                                "polity_id": polity.id,
+                                "kind": "allocation_diverted",
+                                "integrity_delta": round(integrity_delta, 2),
+                                "civil_order_delta": round(civil_order_delta, 2),
+                                "settlement_stability_delta": 0.0,
+                            }
+                        )
+                        legitimacy_log.append(
+                            {
+                                "step": world.current_step,
+                                "polity_id": polity.id,
+                                "kind": "allocation_skimming",
+                                "delta": round(civil_order_delta, 2),
+                            }
+                        )
+                    outcome = "executed_with_skimming" if skim_rate > 0.0 else "executed"
             elif command_subject == "muster_force":
                 profile = _settlement_population_profile(world, settlement.id)
                 combat_draw = max(0.0, min(profile["combat"] * 0.15, 2.0)) * compliance

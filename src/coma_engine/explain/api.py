@@ -88,6 +88,12 @@ def debug_grade_step_report(world: WorldState, step: int) -> list[str]:
                 f"{flow_type}:{entry.get('settlement_id')}:remitted={entry.get('remitted_value')}:"
                 f"retained={entry.get('retained_value')}"
             )
+        elif flow_type == "resource_allocation":
+            lines.append(
+                "resource_flow:"
+                f"allocation:{entry.get('settlement_id')}:delivered={entry.get('delivered_value')}:"
+                f"diverted={entry.get('diverted_value')}"
+            )
         elif flow_type == "muster_force":
             lines.append(
                 "resource_flow:"

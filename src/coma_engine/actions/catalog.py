@@ -85,6 +85,16 @@ ACTION_TEMPLATES: dict[str, ActionTemplate] = {
         visibility_strength=20.0,
         command_subject="resource_levy",
     ),
+    "ALLOCATE_RESOURCES": ActionTemplate(
+        action_type="ALLOCATE_RESOURCES",
+        signature=TargetSignature(required_targets=("target_settlement_id",)),
+        default_priority_class="civic",
+        default_duration_type="instant",
+        default_duration=1,
+        availability_rule_id="allocate_resources",
+        visibility_strength=18.0,
+        command_subject="resource_allocation",
+    ),
     "DECLARE_WAR": ActionTemplate(
         action_type="DECLARE_WAR",
         signature=TargetSignature(required_targets=("target_polity_id",)),

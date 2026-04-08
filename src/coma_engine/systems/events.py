@@ -20,6 +20,7 @@ EVENT_TYPE_MAP: dict[tuple[str, str], tuple[str, str, str]] = {
     ("FOUND_POLITY", "interrupted"): ("FOUNDING_INTERRUPTED", "polity_found_interrupted", HistoricalLayer.LOCAL_CHRONICLE.value),
     ("FORMAL_TAX_ORDER", "succeeded"): ("TAX_ORDER_ISSUED", "tax_order_issued", HistoricalLayer.LOCAL_CHRONICLE.value),
     ("LEVY_RESOURCES", "succeeded"): ("LEVY_ORDER_ISSUED", "resource_levy_issued", HistoricalLayer.LOCAL_CHRONICLE.value),
+    ("ALLOCATE_RESOURCES", "succeeded"): ("RESOURCE_ALLOCATION_ORDERED", "resource_allocation_ordered", HistoricalLayer.LOCAL_CHRONICLE.value),
     ("DECLARE_WAR", "succeeded"): ("WAR_DECLARED", "war_declared", HistoricalLayer.CIVILIZATION_NODE.value),
     ("MUSTER_FORCE", "succeeded"): ("FORCE_MUSTER_ORDERED", "muster_force_ordered", HistoricalLayer.LOCAL_CHRONICLE.value),
     ("MUSTER_FORCE", "partial"): ("FORCE_MUSTER_UNDERWAY", "muster_force_partial", HistoricalLayer.LOCAL_CHRONICLE.value),
@@ -71,7 +72,7 @@ def materialize_outcomes(world: WorldState) -> None:
 def _importance_for(event_type: str, outcome: ActionOutcome) -> float:
     if event_type in {"POLITY_FOUNDED", "WAR_DECLARED"}:
         return 90.0
-    if event_type in {"TAX_ORDER_ISSUED", "LEVY_ORDER_ISSUED", "FAILED_FOUNDING", "FOUNDING_INTERRUPTED"}:
+    if event_type in {"TAX_ORDER_ISSUED", "LEVY_ORDER_ISSUED", "RESOURCE_ALLOCATION_ORDERED", "FAILED_FOUNDING", "FOUNDING_INTERRUPTED"}:
         return 55.0
     return 35.0 + abs(sum(outcome.resource_delta.values()))
 
