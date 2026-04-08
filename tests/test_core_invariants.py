@@ -7,11 +7,12 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from coma_engine.config.schema import default_config
+from coma_engine.actions.models import Action
 from coma_engine.core.transfers import move_npc_to_tile, reconcile_references, validate_reference_consistency
 from coma_engine.explain import debug_grade_action_explanations
 from coma_engine.player.interventions import queue_information_intervention, queue_npc_modifier_intervention
 from coma_engine.simulation.engine import SimulationEngine
-from coma_engine.simulation.phases import _found_polity, run_political_phase
+from coma_engine.simulation.phases import _found_polity, run_political_phase, run_resolution_phase
 from coma_engine.systems.generation import create_world
 from coma_engine.systems.propagation import emit_command_packet
 
@@ -111,6 +112,58 @@ class CoreInvariantTests(unittest.TestCase):
         world.history_index["packet_deliveries"][packet_id] = [leader.id]
         run_political_phase(world.clone_for_phase(), world)
         self.assertGreater(polity.treasury["wealth"], initial)
+
+    def test_continuous_action_can_be_interrupted_with_formal_record(self) -> None:
+        world = create_world(default_config(seed=31))
+        actor = next(iter(world.npcs.values()))
+        start_tile = next(
+            tile.id
+            for tile in world.tiles.values()
+            if tile.terrain_type != "water"
+            and any(world.tiles[adjacent_id].terrain_type != "water" for adjacent_id in tile.adjacent_tile_ids)
+        )
+        move_npc_to_tile(world, actor.id, start_tile)
+        target_tile = next(
+            tile_id
+            for tile_id in world.tiles[start_tile].adjacent_tile_ids
+            if world.tiles[tile_id].terrain_type != "water"
+        )
+        world.tiles[target_tile].danger = 95.0
+        world.action_queue.append(
+            Action(
+                id=world.next_id("action"),
+                action_type="MOVE",
+                actor_id=actor.id,
+                target_npc_id=None,
+                target_tile_id=target_tile,
+                target_settlement_id=None,
+                target_faction_id=None,
+                target_polity_id=None,
+                declared_step=world.current_step,
+                priority_class="survival",
+                duration_type="travel",
+                estimated_duration=2,
+                resource_cost={"food": 0.2, "wood": 0.0, "ore": 0.0, "wealth": 0.0},
+                risk_value=10.0,
+                availability_rule_id="movement",
+                resolution_group_key=f"MOVE:{target_tile}",
+                status="declared",
+            )
+        )
+        run_resolution_phase(world.clone_for_phase(), world)
+        self.assertTrue(any(outcome.result == "interrupted" for outcome in world.outcome_records))
+
+    def test_command_chain_can_delay_when_local_executor_is_missing(self) -> None:
+        world = create_world(default_config(seed=37))
+        leader = max(world.npcs.values(), key=lambda npc: npc.office_rank)
+        _found_polity(world, leader.id, leader.settlement_id)
+        settlement = world.settlements[leader.settlement_id]
+        packet_id = emit_command_packet(world, leader.id, settlement.id, "formal_tax_order")
+        world.history_index["packet_deliveries"][packet_id] = []
+        run_political_phase(world.clone_for_phase(), world)
+        self.assertTrue(
+            any(entry["outcome"] == "delayed_no_executor" for entry in world.history_index["command_execution_log"])
+        )
 
 
 if __name__ == "__main__":

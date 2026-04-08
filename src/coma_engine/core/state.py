@@ -55,6 +55,8 @@ class WorldState:
             },
             "action_explanations": {},
             "command_log": [],
+            "command_packet_subjects": {},
+            "command_execution_log": [],
             "packet_deliveries": {},
             "executed_command_packets": set(),
         }

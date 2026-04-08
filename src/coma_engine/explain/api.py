@@ -15,6 +15,13 @@ def debug_grade_step_report(world: WorldState, step: int) -> list[str]:
         lines.append(f"{npc_id}: {ordered}")
     command_log: list[str] = world.history_index["command_log"]  # type: ignore[assignment]
     lines.extend(f"command:{entry}" for entry in command_log[-5:])
+    command_execution_log: list[dict[str, object]] = world.history_index["command_execution_log"]  # type: ignore[assignment]
+    for entry in command_execution_log[-5:]:
+        lines.append(
+            "command_exec:"
+            f"{entry.get('packet_id')}:{entry.get('command_subject')}:"
+            f"{entry.get('outcome')}:score={entry.get('score')}"
+        )
     return lines
 
 

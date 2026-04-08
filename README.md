@@ -35,8 +35,11 @@ This repository implements the first-pass formal systems foundation described in
 - Initial world generation with tiles, NPCs, early settlement/faction seeding
 - Reference reconciliation and mirror validation for ownership and membership links
 - Event materialization from action outcomes with derived memories and info packets
+- Formal command packets with delivery, delay, distortion, resistance, and execution records
+- Persistent archives for dissolved settlements, factions, and polities so history references remain valid
+- First-pass continuous-action semantics for partial progress, interruption, and outcome recording
 - Formal player intervention queue restricted to approved channels
-- Core invariant tests for replayability, reference consistency, political gating, and phase snapshots
+- Core invariant tests for replayability, reference consistency, political gating, phase snapshots, action interruption, and command-chain delay
 
 ## Quick start
 
@@ -57,13 +60,23 @@ python -m unittest discover -s tests -v
 
 This repository can now run the formal simulation backbone from the command line. It also includes a simple interactive shell for stepping the world, printing a map, inspecting entities, and queuing basic player interventions. It is not yet a full graphical game client, so there is no windowed launcher or gameplay UI at this stage.
 
+Interactive shell commands:
+
+- `step`: advance one simulation step
+- `map`: print a compact terrain and settlement map
+- `npc <npc_id>`: inspect one NPC summary
+- `settlement <settlement_id>`: inspect one settlement summary
+- `bless <npc_id>`: queue a player modifier intervention
+- `resource <tile_or_settlement_id>`: queue a player resource modifier intervention
+- `rumor <tile_id>`: queue an information intervention
+- `miracle <tile_id>`: queue an event-based intervention
+- `quit`: exit the shell
+
 ## Current scope
 
 This is a formal backbone, not a content-complete game. The code currently prioritizes system closure and architectural compliance over content breadth, UI, and scenario richness. Several systems are intentionally first-pass implementations with room for deeper expansion, but the structure is designed so future work extends the foundation instead of replacing it.
 
-## Source of truth
-
-## Updated launch notes
+## Source of truth and launch notes
 
 Use the root launcher so local users do not need to set `PYTHONPATH` manually:
 
@@ -77,6 +90,4 @@ For the interactive shell:
 python run_game.py --steps 20 --interactive
 ```
 
-The canonical design document referenced in this repository is `遊戲製作.md`.
-
-The design source of truth for this repository is `遊戲製作.md`. When extending the project, implementation decisions should remain subordinate to that specification rather than inventing a parallel ruleset.
+The canonical design document for this repository is `遊戲製作.md`. All implementation decisions remain subordinate to that specification rather than inventing a parallel ruleset.

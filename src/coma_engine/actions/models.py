@@ -80,3 +80,8 @@ class ActionTemplate:
     default_duration_type: str
     default_duration: int
     availability_rule_id: str
+    visibility_strength: float = 0.0
+    interruptible: bool = True
+    interruption_threshold: float = 80.0
+    partial_refund_rate: float = 0.0
+    command_subject: str | None = None

@@ -68,7 +68,9 @@ def emit_command_packet(
         propagation_channels=["organizational"],
     )
     command_log: list[str] = world.history_index["command_log"]  # type: ignore[assignment]
+    command_subjects: dict[str, str] = world.history_index["command_packet_subjects"]  # type: ignore[assignment]
     command_log.append(f"{packet_id}:{summary_code}")
+    command_subjects[packet_id] = summary_code
     return packet_id
 
 

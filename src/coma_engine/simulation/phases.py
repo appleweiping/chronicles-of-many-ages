@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from coma_engine.actions.catalog import ACTION_TEMPLATES
-from coma_engine.actions.models import Action, ActionOutcome, ContestScore
+from coma_engine.actions.models import Action, ActionOutcome, AvailabilityDecision, ContestScore
 from coma_engine.core.enums import ActionStatus
 from coma_engine.core.state import WorldState
 from coma_engine.core.transfers import (
@@ -185,33 +185,146 @@ def _refresh_local_perception(world: WorldState, npc) -> None:
     ]
 
 
-def _availability_for(world: WorldState, npc_id: str, action_type: str, target_ref: str | None) -> bool:
+def _visible_tiles_for(world: WorldState, npc_id: str) -> set[str]:
     npc = world.npcs[npc_id]
+    return {npc.location_tile_id, *traversable_neighbors(world, npc.location_tile_id)}
+
+
+def _visible_settlements_for(world: WorldState, npc_id: str) -> set[str]:
+    visible: set[str] = set()
+    for tile_id in _visible_tiles_for(world, npc_id):
+        tile = world.tiles[tile_id]
+        if tile.settlement_id:
+            visible.add(tile.settlement_id)
+    return visible
+
+
+def _visible_polities_for(world: WorldState, npc_id: str) -> set[str]:
+    visible: set[str] = set()
+    for settlement_id in _visible_settlements_for(world, npc_id):
+        settlement = world.settlements.get(settlement_id)
+        if settlement and settlement.polity_id:
+            visible.add(settlement.polity_id)
+    for tile_id in _visible_tiles_for(world, npc_id):
+        for resident_id in world.tiles[tile_id].resident_npc_ids:
+            other = world.npcs[resident_id]
+            if other.polity_id:
+                visible.add(other.polity_id)
+    return visible
+
+
+def _availability_decision(world: WorldState, npc_id: str, action_type: str, target_ref: str | None) -> AvailabilityDecision:
+    npc = world.npcs[npc_id]
+    visible_tiles = _visible_tiles_for(world, npc_id)
+    visible_settlements = _visible_settlements_for(world, npc_id)
+    visible_polities = _visible_polities_for(world, npc_id)
+
     if not npc.alive:
-        return False
+        return AvailabilityDecision(False, "actor_dead")
+
     if action_type == "FORAGE":
-        return True
+        return AvailabilityDecision(True, "basic_survival")
     if action_type == "MOVE":
-        return target_ref is not None and target_ref in traversable_neighbors(world, npc.location_tile_id)
+        allowed = target_ref is not None and target_ref in traversable_neighbors(world, npc.location_tile_id)
+        return AvailabilityDecision(allowed, "movement" if allowed else "movement_blocked")
+    if action_type == "SCOUT":
+        allowed = target_ref is not None and target_ref in traversable_neighbors(world, npc.location_tile_id)
+        return AvailabilityDecision(allowed, "scouting" if allowed else "scouting_blocked")
+    if action_type == "MIGRATE":
+        if target_ref is None or target_ref not in visible_tiles or target_ref == npc.location_tile_id:
+            return AvailabilityDecision(False, "migration_target_invalid")
+        if target_ref not in traversable_neighbors(world, npc.location_tile_id):
+            return AvailabilityDecision(False, "migration_path_invalid")
+        return AvailabilityDecision(True, "migrate")
+    if action_type == "TRADE":
+        if not npc.settlement_id or target_ref is None or target_ref == npc.settlement_id:
+            return AvailabilityDecision(False, "trade_requires_external_settlement")
+        if target_ref not in visible_settlements:
+            return AvailabilityDecision(False, "trade_target_not_visible")
+        return AvailabilityDecision(True, "trade")
     if action_type == "FOUND_POLITY":
         if npc.office_rank < world.config.balance_parameters.low_rank_high_politics_gate_rank:
-            return False
+            return AvailabilityDecision(False, "rank_too_low")
         if not npc.settlement_id or not npc.faction_id:
-            return False
+            return AvailabilityDecision(False, "missing_organization_base")
         settlement = world.settlements[npc.settlement_id]
         faction = world.factions[npc.faction_id]
         if settlement.polity_id:
-            return False
-        return (
+            return AvailabilityDecision(False, "already_under_polity")
+        allowed = (
             faction.support_score >= world.config.balance_parameters.polity_entry_support
             and faction.cohesion >= world.config.balance_parameters.polity_entry_support
             and settlement.stability >= world.config.balance_parameters.polity_entry_stability
         )
+        return AvailabilityDecision(allowed, "found_polity" if allowed else "found_polity_threshold_failed")
     if action_type == "FORMAL_TAX_ORDER":
-        return npc.polity_id is not None and npc.office_rank >= 3
+        allowed = (
+            npc.polity_id is not None
+            and npc.office_rank >= world.config.balance_parameters.low_rank_high_politics_gate_rank
+            and target_ref in world.settlements
+            and world.settlements[target_ref].polity_id == npc.polity_id
+        )
+        return AvailabilityDecision(allowed, "formal_tax_order" if allowed else "tax_order_unavailable")
+    if action_type == "LEVY_RESOURCES":
+        allowed = (
+            npc.polity_id is not None
+            and npc.office_rank >= world.config.balance_parameters.low_rank_high_politics_gate_rank
+            and target_ref in world.settlements
+            and world.settlements[target_ref].polity_id == npc.polity_id
+        )
+        return AvailabilityDecision(allowed, "resource_levy" if allowed else "resource_levy_unavailable")
+    if action_type == "MUSTER_FORCE":
+        allowed = (
+            npc.polity_id is not None
+            and npc.office_rank >= world.config.balance_parameters.low_rank_high_politics_gate_rank
+            and target_ref in world.settlements
+            and world.settlements[target_ref].polity_id == npc.polity_id
+        )
+        return AvailabilityDecision(allowed, "muster_force" if allowed else "muster_force_unavailable")
     if action_type == "DECLARE_WAR":
-        return npc.polity_id is not None and npc.office_rank >= 4 and len(world.polities) > 1
-    return False
+        allowed = (
+            npc.polity_id is not None
+            and npc.office_rank >= world.config.balance_parameters.low_rank_high_politics_gate_rank + 1
+            and target_ref in visible_polities
+            and target_ref != npc.polity_id
+        )
+        return AvailabilityDecision(allowed, "declare_war" if allowed else "war_target_unavailable")
+    return AvailabilityDecision(False, "unsupported_action")
+
+
+def _availability_for(world: WorldState, npc_id: str, action_type: str, target_ref: str | None) -> bool:
+    return _availability_decision(world, npc_id, action_type, target_ref).allowed
+
+
+def _action_target_ref(action: Action) -> str | None:
+    for ref in (
+        action.target_npc_id,
+        action.target_tile_id,
+        action.target_settlement_id,
+        action.target_faction_id,
+        action.target_polity_id,
+    ):
+        if ref:
+            return ref
+    return None
+
+
+def _action_resource_cost(action_type: str) -> dict[str, float]:
+    if action_type in {"SCOUT", "MOVE"}:
+        return {"food": 0.2, "wood": 0.0, "ore": 0.0, "wealth": 0.0}
+    if action_type == "MIGRATE":
+        return {"food": 0.6, "wood": 0.0, "ore": 0.0, "wealth": 0.0}
+    if action_type == "TRADE":
+        return {"food": 0.4, "wood": 0.0, "ore": 0.0, "wealth": 0.2}
+    if action_type == "FOUND_POLITY":
+        return {"food": 0.8, "wood": 0.2, "ore": 0.0, "wealth": 0.8}
+    if action_type in {"FORMAL_TAX_ORDER", "LEVY_RESOURCES"}:
+        return {"food": 0.0, "wood": 0.0, "ore": 0.0, "wealth": 0.2}
+    if action_type == "DECLARE_WAR":
+        return {"food": 0.5, "wood": 0.0, "ore": 0.0, "wealth": 1.0}
+    if action_type == "MUSTER_FORCE":
+        return {"food": 0.6, "wood": 0.2, "ore": 0.1, "wealth": 0.4}
+    return {"food": 0.0, "wood": 0.0, "ore": 0.0, "wealth": 0.0}
 
 
 def _perceived_resource_score(npc, location_ref: str | None) -> float:
@@ -234,6 +347,11 @@ def _perceived_threat_score(npc, location_ref: str | None) -> float:
 
 def _score_action(world: WorldState, npc_id: str, action_type: str, target_ref: str | None) -> dict[str, float]:
     npc = world.npcs[npc_id]
+    local_polity_conflict = 0.0
+    if npc.settlement_id and npc.settlement_id in world.settlements:
+        settlement = world.settlements[npc.settlement_id]
+        if settlement.polity_id and settlement.polity_id != npc.polity_id:
+            local_polity_conflict = 10.0
     scores = {
         "need_gain": 0.0,
         "goal_progress": 0.0,
@@ -255,6 +373,21 @@ def _score_action(world: WorldState, npc_id: str, action_type: str, target_ref: 
         scores["need_gain"] = _perceived_resource_score(npc, target_ref) * 1.2
         scores["path_cost"] = shortest_path_cost(world, npc.location_tile_id, target_ref) * 6.0
         scores["risk_penalty"] = _perceived_threat_score(npc, target_ref) * 0.1
+    elif action_type == "SCOUT" and target_ref:
+        scores["goal_progress"] = 16.0
+        scores["need_gain"] = _perceived_resource_score(npc, target_ref) * 0.25
+        scores["path_cost"] = shortest_path_cost(world, npc.location_tile_id, target_ref) * 4.0
+        scores["risk_penalty"] = _perceived_threat_score(npc, target_ref) * 0.2
+    elif action_type == "MIGRATE" and target_ref:
+        scores["need_gain"] = _perceived_resource_score(npc, target_ref) * 0.8 + npc.needs["safety"] * 0.35
+        scores["path_cost"] = shortest_path_cost(world, npc.location_tile_id, target_ref) * 8.0
+        scores["risk_penalty"] = _perceived_threat_score(npc, target_ref) * 0.08
+        scores["organization_conflict_cost"] = 8.0 if npc.settlement_id else 0.0
+    elif action_type == "TRADE" and target_ref:
+        scores["goal_progress"] = 18.0
+        scores["relationship_delta"] = 10.0
+        scores["resource_cost"] = 4.0
+        scores["organization_conflict_cost"] = local_polity_conflict
     elif action_type == "FOUND_POLITY":
         scores["goal_progress"] = 60.0 if npc.long_term_goal.goal_type == "FOUND_POLITY" else 25.0
         scores["belief_consistency"] = npc.beliefs.get("destiny", 0.0) * 0.4
@@ -263,9 +396,17 @@ def _score_action(world: WorldState, npc_id: str, action_type: str, target_ref: 
     elif action_type == "FORMAL_TAX_ORDER":
         scores["goal_progress"] = 24.0
         scores["organization_conflict_cost"] = 10.0
+    elif action_type == "LEVY_RESOURCES":
+        scores["goal_progress"] = 20.0
+        scores["organization_conflict_cost"] = 14.0
+        scores["risk_penalty"] = 6.0
     elif action_type == "DECLARE_WAR":
         scores["goal_progress"] = 18.0
         scores["risk_penalty"] = 30.0
+    elif action_type == "MUSTER_FORCE":
+        scores["goal_progress"] = 26.0
+        scores["organization_conflict_cost"] = 18.0
+        scores["resource_cost"] = 8.0
     return scores
 
 
@@ -307,20 +448,31 @@ def run_decision_phase(snapshot: WorldState, working: WorldState) -> None:
             for entry in npc.perceived_state.perceived_resource_signals
             if entry.location_ref in traversable_neighbors(working, npc.location_tile_id)
         }
-        for adjacent_id in candidate_move_targets:
+        visible_settlements = _visible_settlements_for(working, npc.id)
+        visible_polities = _visible_polities_for(working, npc.id)
+        for adjacent_id in sorted(candidate_move_targets):
             action_space.append(("MOVE", adjacent_id))
+            action_space.append(("SCOUT", adjacent_id))
+            if npc.needs["food"] >= 45.0 or npc.needs["safety"] >= 40.0:
+                action_space.append(("MIGRATE", adjacent_id))
+        for settlement_id in sorted(visible_settlements):
+            if settlement_id != npc.settlement_id:
+                action_space.append(("TRADE", settlement_id))
         if npc.settlement_id:
             action_space.append(("FOUND_POLITY", npc.settlement_id))
             action_space.append(("FORMAL_TAX_ORDER", npc.settlement_id))
+            action_space.append(("LEVY_RESOURCES", npc.settlement_id))
+            action_space.append(("MUSTER_FORCE", npc.settlement_id))
         if npc.polity_id:
-            for polity_id in working.polities:
+            for polity_id in sorted(visible_polities):
                 if polity_id != npc.polity_id:
                     action_space.append(("DECLARE_WAR", polity_id))
                     break
 
         scored = []
         for action_type, target_ref in action_space:
-            if not _availability_for(working, npc.id, action_type, target_ref):
+            availability = _availability_decision(working, npc.id, action_type, target_ref)
+            if not availability.allowed:
                 continue
             breakdown = _score_action(working, npc.id, action_type, target_ref)
             scored.append((action_type, target_ref, breakdown, _total_score(working, breakdown)))
@@ -347,7 +499,7 @@ def run_decision_phase(snapshot: WorldState, working: WorldState) -> None:
                 priority_class=template.default_priority_class,
                 duration_type=template.default_duration_type,
                 estimated_duration=template.default_duration,
-                resource_cost={"food": 0.0, "wood": 0.0, "ore": 0.0, "wealth": 0.0},
+                resource_cost=_action_resource_cost(chosen_type),
                 risk_value=chosen_breakdown["risk_penalty"],
                 availability_rule_id=template.availability_rule_id,
                 resolution_group_key=_resolution_group_key(chosen_type, chosen_target),
@@ -363,7 +515,14 @@ def run_declaration_phase(snapshot: WorldState, working: WorldState) -> None:
     unique_ids = set()
     deduped = []
     for action in working.action_queue:
-        if action.id not in unique_ids and action.status == ActionStatus.DECLARED.value and _validate_action_signature(action):
+        target_ref = _action_target_ref(action)
+        availability = _availability_decision(working, action.actor_id, action.action_type, target_ref)
+        if (
+            action.id not in unique_ids
+            and action.status == ActionStatus.DECLARED.value
+            and _validate_action_signature(action)
+            and availability.allowed
+        ):
             unique_ids.add(action.id)
             deduped.append(action)
     working.action_queue = deduped
@@ -394,29 +553,73 @@ def _validate_action_signature(action: Action) -> bool:
 
 def run_resolution_phase(snapshot: WorldState, working: WorldState) -> None:
     declared = [action for action in working.action_queue if action.status == ActionStatus.DECLARED.value]
-    valid_actions = _validity_check(snapshot, declared)
-    reserved_actions = _resource_reservation(working, valid_actions)
+    valid_actions, invalid_outcomes = _validity_check(snapshot, declared)
+    reserved_actions, reservation_outcomes = _resource_reservation(working, valid_actions)
     resolved = _contest_resolution(working, reserved_actions)
-    _effect_application(working, resolved)
+    _effect_application(working, resolved, invalid_outcomes + reservation_outcomes)
     _cleanup_and_hooks(working)
 
 
-def _validity_check(snapshot: WorldState, actions: list[Action]) -> list[Action]:
-    return [action for action in actions if action.actor_id in snapshot.npcs and snapshot.npcs[action.actor_id].alive]
+def _outcome_from_action(action: Action, result: str, cause_ref: str) -> ActionOutcome:
+    return ActionOutcome(
+        action_id=action.id,
+        action_type=action.action_type,
+        actor_id=action.actor_id,
+        result=result,
+        summary_code=f"{action.action_type.lower()}_{result}",
+        participant_ids=[action.actor_id],
+        cause_refs=[cause_ref],
+        target_refs=[ref for ref in (_action_target_ref(action),) if ref],
+        resource_delta=dict(action.resource_cost),
+    )
 
 
-def _resource_reservation(working: WorldState, actions: list[Action]) -> list[Action]:
-    reserved = []
+def _validity_check(snapshot: WorldState, actions: list[Action]) -> tuple[list[Action], list[ActionOutcome]]:
+    valid: list[Action] = []
+    outcomes: list[ActionOutcome] = []
+    for action in actions:
+        if action.actor_id not in snapshot.npcs or not snapshot.npcs[action.actor_id].alive:
+            action.status = ActionStatus.CANCELLED.value
+            outcomes.append(_outcome_from_action(action, "cancelled", "actor_invalid"))
+            continue
+        target_ref = _action_target_ref(action)
+        if not _validate_action_signature(action):
+            action.status = ActionStatus.CANCELLED.value
+            outcomes.append(_outcome_from_action(action, "cancelled", "signature_invalid"))
+            continue
+        availability = _availability_decision(snapshot, action.actor_id, action.action_type, target_ref)
+        if not availability.allowed:
+            action.status = ActionStatus.CANCELLED.value
+            outcomes.append(_outcome_from_action(action, "cancelled", availability.reason_code))
+            continue
+        valid.append(action)
+    return valid, outcomes
+
+
+def _resource_reservation(working: WorldState, actions: list[Action]) -> tuple[list[Action], list[ActionOutcome]]:
+    reserved: list[Action] = []
+    outcomes: list[ActionOutcome] = []
     for action in actions:
         actor = working.npcs[action.actor_id]
-        affordable = all(actor.personal_inventory.get(resource, 0.0) >= amount for resource, amount in action.resource_cost.items())
+        settlement = working.settlements.get(actor.settlement_id) if actor.settlement_id else None
+        affordable = all(
+            actor.personal_inventory.get(resource, 0.0) + (settlement.stored_resources.get(resource, 0.0) if settlement else 0.0)
+            >= amount
+            for resource, amount in action.resource_cost.items()
+        )
         if not affordable:
+            action.status = ActionStatus.FAILED.value
+            outcomes.append(_outcome_from_action(action, "failed", "insufficient_resources"))
             continue
         for resource, amount in action.resource_cost.items():
-            actor.personal_inventory[resource] = actor.personal_inventory.get(resource, 0.0) - amount
+            from_actor = min(actor.personal_inventory.get(resource, 0.0), amount)
+            actor.personal_inventory[resource] = actor.personal_inventory.get(resource, 0.0) - from_actor
+            remaining = amount - from_actor
+            if remaining > 0.0 and settlement is not None:
+                settlement.stored_resources[resource] = settlement.stored_resources.get(resource, 0.0) - remaining
         action.status = ActionStatus.RESERVED.value
         reserved.append(action)
-    return reserved
+    return reserved, outcomes
 
 
 def _contest_resolution(working: WorldState, actions: list[Action]) -> list[tuple[Action, ContestScore, str]]:
@@ -428,10 +631,34 @@ def _contest_resolution(working: WorldState, actions: list[Action]) -> list[tupl
         scored = []
         for action in group_actions:
             actor = working.npcs[action.actor_id]
+            target_ref = _action_target_ref(action)
+            ability_component = actor.abilities.get("politics", 0.0)
+            if action.action_type in {"FORAGE", "SCOUT"}:
+                ability_component = actor.abilities.get("foraging", 0.0)
+            elif action.action_type in {"MOVE", "MIGRATE", "TRADE"}:
+                ability_component = actor.abilities.get("mobility", 0.0)
+            elif action.action_type in {"DECLARE_WAR", "MUSTER_FORCE"}:
+                ability_component = actor.abilities.get("warfare", 0.0)
+
+            support_component = 10.0 if actor.faction_id else 0.0
+            if action.target_settlement_id and action.target_settlement_id in working.settlements:
+                target_settlement = working.settlements[action.target_settlement_id]
+                support_component += target_settlement.stability * 0.1
+            if action.action_type in {"FORMAL_TAX_ORDER", "LEVY_RESOURCES", "MUSTER_FORCE"} and actor.polity_id:
+                polity = working.polities.get(actor.polity_id)
+                if polity:
+                    support_component += polity.command_network_state.get("integrity", 0.0) * 0.1
+
+            position_component = 5.0 if actor.settlement_id else 0.0
+            if target_ref and isinstance(target_ref, str) and target_ref.startswith("tile:"):
+                distance = shortest_path_cost(working, actor.location_tile_id, target_ref)
+                if distance != float("inf"):
+                    position_component -= distance * 2.0
+
             score = ContestScore(
-                ability_component=actor.abilities.get("politics", 0.0) if action.action_type != "FORAGE" else actor.abilities.get("foraging", 0.0),
-                support_component=10.0 if actor.faction_id else 0.0,
-                position_component=5.0 if actor.settlement_id else 0.0,
+                ability_component=ability_component,
+                support_component=support_component,
+                position_component=position_component,
                 modifier_component=0.0,
                 noise_component=working.rng.uniform(
                     -working.config.balance_parameters.action_noise_amplitude,
@@ -445,18 +672,33 @@ def _contest_resolution(working: WorldState, actions: list[Action]) -> list[tupl
     return results
 
 
-def _effect_application(working: WorldState, resolved: list[tuple[Action, ContestScore, str]]) -> None:
-    working.outcome_records = []
+def _effect_application(
+    working: WorldState,
+    resolved: list[tuple[Action, ContestScore, str]],
+    prior_outcomes: list[ActionOutcome],
+) -> None:
+    working.outcome_records = list(prior_outcomes)
     for action, _score, result in resolved:
         outcome_result = result
-        if result == "succeeded" and action.duration_type != "instant" and action.estimated_duration > 1:
-            _emit_continuation_leak(working, action)
-            action.status = ActionStatus.DECLARED.value
-            outcome_result = "partial"
+        template = ACTION_TEMPLATES[action.action_type]
+        if result == "succeeded" and action.duration_type != "instant":
+            if _should_interrupt_action(working, action):
+                _refund_action_cost(working, action)
+                action.status = ActionStatus.INTERRUPTED.value
+                outcome_result = "interrupted"
+            elif action.estimated_duration > 1:
+                _emit_continuation_leak(working, action)
+                action.status = ActionStatus.DECLARED.value
+                outcome_result = "partial"
+            else:
+                _apply_success(working, action)
+                action.status = ActionStatus.SUCCEEDED.value
         elif result == "succeeded":
             _apply_success(working, action)
             action.status = ActionStatus.SUCCEEDED.value
         else:
+            if template.partial_refund_rate > 0.0:
+                _refund_action_cost(working, action)
             action.status = ActionStatus.INTERRUPTED.value if action.duration_type != "instant" else ActionStatus.FAILED.value
             outcome_result = "interrupted" if action.duration_type != "instant" else "failed"
         working.outcome_records.append(
@@ -484,9 +726,40 @@ def _effect_application(working: WorldState, resolved: list[tuple[Action, Contes
         )
 
 
+def _should_interrupt_action(working: WorldState, action: Action) -> bool:
+    template = ACTION_TEMPLATES[action.action_type]
+    if not template.interruptible:
+        return False
+    actor = working.npcs[action.actor_id]
+    if actor.health < 25.0:
+        return True
+    current_threat = working.tiles[actor.location_tile_id].danger
+    if current_threat >= template.interruption_threshold:
+        return True
+    if action.target_tile_id and action.target_tile_id in working.tiles:
+        if working.tiles[action.target_tile_id].danger >= template.interruption_threshold:
+            return True
+    if action.target_settlement_id and action.target_settlement_id in working.settlements:
+        settlement = working.settlements[action.target_settlement_id]
+        local_resistance = max(0.0, 50.0 - settlement.stability)
+        if local_resistance >= template.interruption_threshold:
+            return True
+    return False
+
+
+def _refund_action_cost(working: WorldState, action: Action) -> None:
+    template = ACTION_TEMPLATES[action.action_type]
+    if template.partial_refund_rate <= 0.0:
+        return
+    actor = working.npcs[action.actor_id]
+    for resource, amount in action.resource_cost.items():
+        actor.personal_inventory[resource] = actor.personal_inventory.get(resource, 0.0) + amount * template.partial_refund_rate
+
+
 def _emit_continuation_leak(working: WorldState, action: Action) -> None:
     if action.duration_type not in {"travel", "campaign", "scheme", "channeling"}:
         return
+    template = ACTION_TEMPLATES[action.action_type]
     actor = working.npcs[action.actor_id]
     location_ref = actor.location_tile_id
     if action.target_tile_id:
@@ -500,7 +773,7 @@ def _emit_continuation_leak(working: WorldState, action: Action) -> None:
         content_domain="event",
         subject_ref=action.action_type,
         location_ref=location_ref,
-        strength=18.0,
+        strength=max(10.0, template.visibility_strength * 0.55),
         visibility_scope="local",
         ttl=working.config.balance_parameters.rumor_base_ttl,
         truth_alignment=0.85,
@@ -533,12 +806,45 @@ def _apply_success(working: WorldState, action: Action) -> None:
         )
     elif action.action_type == "MOVE" and action.target_tile_id:
         move_npc_to_tile(working, actor.id, action.target_tile_id)
+    elif action.action_type == "SCOUT" and action.target_tile_id:
+        tile = working.tiles[action.target_tile_id]
+        emit_info_packet(
+            working,
+            source_event_id=None,
+            origin_actor_id=actor.id,
+            content_domain="resource",
+            subject_ref=action.target_tile_id,
+            location_ref=action.target_tile_id,
+            strength=tile.current_stock.get("food", 0.0) + tile.base_yield.get("food", 0.0) * 8.0,
+            visibility_scope="local",
+            ttl=working.config.balance_parameters.rumor_base_ttl,
+            truth_alignment=0.95,
+            propagation_channels=["relationship", "spatial"],
+        )
+    elif action.action_type == "TRADE" and action.target_settlement_id and actor.settlement_id:
+        source_settlement = working.settlements.get(actor.settlement_id)
+        target_settlement = working.settlements.get(action.target_settlement_id)
+        if source_settlement and target_settlement:
+            shipped_food = min(2.0, source_settlement.stored_resources.get("food", 0.0))
+            source_settlement.stored_resources["food"] = source_settlement.stored_resources.get("food", 0.0) - shipped_food
+            source_settlement.stored_resources["wealth"] = source_settlement.stored_resources.get("wealth", 0.0) + 0.8
+            target_settlement.stored_resources["food"] = target_settlement.stored_resources.get("food", 0.0) + shipped_food
+            target_settlement.stored_resources["wealth"] = target_settlement.stored_resources.get("wealth", 0.0) + 0.4
+    elif action.action_type == "MIGRATE" and action.target_tile_id:
+        move_npc_to_tile(working, actor.id, action.target_tile_id)
+        destination_settlement = working.tiles[action.target_tile_id].settlement_id
+        if destination_settlement != actor.settlement_id:
+            assign_npc_settlement(working, actor.id, destination_settlement)
     elif action.action_type == "FOUND_POLITY" and action.target_settlement_id:
         _found_polity(working, actor.id, action.target_settlement_id)
     elif action.action_type == "FORMAL_TAX_ORDER" and action.target_settlement_id:
         emit_command_packet(working, actor.id, action.target_settlement_id, "formal_tax_order")
+    elif action.action_type == "LEVY_RESOURCES" and action.target_settlement_id:
+        emit_command_packet(working, actor.id, action.target_settlement_id, "resource_levy")
     elif action.action_type == "DECLARE_WAR" and action.target_polity_id and actor.polity_id:
         _declare_war(working, actor.polity_id, action.target_polity_id)
+    elif action.action_type == "MUSTER_FORCE" and action.target_settlement_id:
+        emit_command_packet(working, actor.id, action.target_settlement_id, "muster_force")
 
 
 def _found_polity(working: WorldState, actor_id: str, settlement_id: str) -> None:
@@ -617,8 +923,8 @@ def _cleanup_and_hooks(working: WorldState) -> None:
 
 
 def run_political_phase(snapshot: WorldState, working: WorldState) -> None:
-    _execute_command_chain(working)
     _update_taxation(working)
+    _execute_command_chain(working)
     _update_war_states(working)
     _update_settlement_hysteresis(working)
     _update_faction_hysteresis(working)
@@ -649,6 +955,8 @@ def _archive_polity(world: WorldState, polity_id: str) -> None:
 def _execute_command_chain(world: WorldState) -> None:
     packet_deliveries: dict[str, list[str]] = world.history_index["packet_deliveries"]  # type: ignore[assignment]
     executed_packets: set[str] = world.history_index["executed_command_packets"]  # type: ignore[assignment]
+    command_subjects: dict[str, str] = world.history_index["command_packet_subjects"]  # type: ignore[assignment]
+    command_execution_log: list[dict[str, object]] = world.history_index["command_execution_log"]  # type: ignore[assignment]
     for packet in world.info_packets:
         if packet.content_domain != "command" or packet.id in executed_packets:
             continue
@@ -666,7 +974,20 @@ def _execute_command_chain(world: WorldState) -> None:
             and world.npcs[npc_id].settlement_id == settlement.id
             and world.npcs[npc_id].polity_id == origin.polity_id
         ]
+        command_subject = command_subjects.get(packet.id, "formal_tax_order")
         if not local_executors:
+            polity = world.polities[origin.polity_id]
+            polity.command_network_state["latency"] = min(100.0, polity.command_network_state.get("latency", 0.0) + 6.0)
+            command_execution_log.append(
+                {
+                    "step": world.current_step,
+                    "packet_id": packet.id,
+                    "settlement_id": settlement.id,
+                    "command_subject": command_subject,
+                    "outcome": "delayed_no_executor",
+                    "score": 0.0,
+                }
+            )
             continue
         polity = world.polities[origin.polity_id]
         capital_tile_id = world.settlements[polity.capital_settlement_id].core_tile_id
@@ -677,16 +998,49 @@ def _execute_command_chain(world: WorldState) -> None:
         local_resistance = 0.0
         if settlement.faction_id and settlement.faction_id != polity.ruling_faction_id:
             local_resistance = world.factions[settlement.faction_id].cohesion * 0.2
-        execution_score = network_integrity + settlement.stability - distance_cost * 6.0 - local_resistance
-        if execution_score >= 45.0:
-            collected = settlement.current_taxable_output * max(0.15, min(0.65, execution_score / 100.0))
-            leakage = max(0.0, 1.0 - polity.administrative_reach / 100.0)
-            actual = collected * (1.0 - leakage)
-            polity.treasury["wealth"] = polity.treasury.get("wealth", 0.0) + actual
-            polity.tax_leakage_rate = leakage
+        latency_penalty = polity.command_network_state.get("latency", 0.0) * 0.25
+        execution_score = network_integrity + settlement.stability - distance_cost * 6.0 - local_resistance - latency_penalty
+        outcome = "failed"
+        if execution_score >= 55.0:
+            if command_subject == "formal_tax_order":
+                collected = settlement.current_taxable_output * max(0.15, min(0.65, execution_score / 100.0))
+                leakage = max(0.0, 1.0 - polity.administrative_reach / 100.0)
+                actual = collected * (1.0 - leakage)
+                polity.treasury["wealth"] = polity.treasury.get("wealth", 0.0) + actual
+                polity.tax_leakage_rate = leakage
+            elif command_subject == "resource_levy":
+                for resource in ("food", "wood", "ore"):
+                    extracted = settlement.stored_resources.get(resource, 0.0) * 0.15
+                    settlement.stored_resources[resource] = settlement.stored_resources.get(resource, 0.0) - extracted
+                    polity.treasury[resource] = polity.treasury.get(resource, 0.0) + extracted
+            elif command_subject == "muster_force":
+                labor_draw = max(0.0, min(settlement.labor_pool * 0.15, 2.0))
+                settlement.labor_pool = max(0.0, settlement.labor_pool - labor_draw)
+                settlement.stored_resources["food"] = max(0.0, settlement.stored_resources.get("food", 0.0) - labor_draw * 0.8)
+                polity.military_strength_base = world.clamp_metric(polity.military_strength_base + labor_draw * 4.0)
+                polity.war_readiness = world.clamp_metric(polity.war_readiness + labor_draw * 8.0)
+            polity.command_network_state["latency"] = max(0.0, polity.command_network_state.get("latency", 0.0) - 2.0)
+            outcome = "executed"
             executed_packets.add(packet.id)
+        elif execution_score >= 40.0:
+            packet.distortion = min(1.0, packet.distortion + 0.12)
+            polity.command_network_state["latency"] = min(100.0, polity.command_network_state.get("latency", 0.0) + 4.0)
+            outcome = "delayed_distorted"
         else:
-            polity.command_network_state["latency"] = min(100.0, polity.command_network_state.get("latency", 0.0) + 5.0)
+            packet.distortion = min(1.0, packet.distortion + 0.2)
+            polity.command_network_state["latency"] = min(100.0, polity.command_network_state.get("latency", 0.0) + 6.0)
+            settlement.stability = world.clamp_metric(settlement.stability - 1.5)
+            outcome = "resisted"
+        command_execution_log.append(
+            {
+                "step": world.current_step,
+                "packet_id": packet.id,
+                "settlement_id": settlement.id,
+                "command_subject": command_subject,
+                "outcome": outcome,
+                "score": round(execution_score, 2),
+            }
+        )
 
 
 def _update_taxation(world: WorldState) -> None:

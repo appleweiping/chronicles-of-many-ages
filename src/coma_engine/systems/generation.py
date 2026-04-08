@@ -90,7 +90,12 @@ def _generate_npcs(world: WorldState) -> None:
             personal_inventory={"food": 4.0, "wood": 0.0, "ore": 0.0, "wealth": 0.0},
             needs={"food": 35.0, "safety": 40.0, "social": 30.0, "status": 25.0, "meaning": 20.0},
             personality={"risk_tolerance": 45.0, "familiality": 55.0, "ambition": 60.0 if index == 0 else 35.0},
-            abilities={"foraging": 55.0, "politics": 70.0 if index == 0 else 30.0, "warfare": 40.0},
+            abilities={
+                "foraging": 55.0,
+                "mobility": 48.0,
+                "politics": 70.0 if index == 0 else 30.0,
+                "warfare": 40.0,
+            },
             beliefs={"miracle_credibility": 25.0, "destiny": 50.0, "legitimacy_form": 45.0},
             relationships={},
             memory_ids=[],
