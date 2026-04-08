@@ -63,6 +63,8 @@ class WorldState:
             "relation_log": [],
             "belief_log": [],
             "memory_conversion_log": [],
+            "local_command_log": [],
+            "loot_remittance_log": [],
             "packet_deliveries": {},
             "executed_command_packets": set(),
         }

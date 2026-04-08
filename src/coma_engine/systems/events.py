@@ -63,6 +63,7 @@ def materialize_outcomes(world: WorldState) -> None:
     _materialize_command_execution(world)
     _materialize_demographics(world)
     _materialize_war_changes(world)
+    _materialize_loot_remittance(world)
     _materialize_legitimacy_changes(world)
     _convert_memories(world)
 
@@ -143,6 +144,12 @@ def _materialize_command_execution(world: WorldState) -> None:
         if outcome == "executed":
             event_type = "COMMAND_EXECUTED"
             importance = 52.0
+        elif outcome == "executed_with_skimming":
+            event_type = "COMMAND_SKIMMED"
+            importance = 58.0
+        elif outcome == "softened":
+            event_type = "COMMAND_SOFTENED"
+            importance = 50.0
         elif outcome == "delayed_distorted":
             event_type = "COMMAND_DELAYED"
             importance = 46.0
@@ -313,6 +320,37 @@ def _materialize_legitimacy_changes(world: WorldState) -> None:
             cause_refs=[str(entry["kind"])],
             outcome_summary_code=f"{entry['kind']}:{entry['delta']}",
             importance=42.0,
+            visibility_scope="local",
+            derived_memory_ids=[],
+            derived_modifier_ids=[],
+            derived_info_packet_ids=[],
+        )
+        world.events[event_id] = event
+        events_by_step.setdefault(world.current_step, []).append(event_id)
+        event_layers[HistoricalLayer.LOCAL_CHRONICLE.value].append(event_id)
+        _derive_packets(world, event)
+        entry["materialized"] = True
+
+
+def _materialize_loot_remittance(world: WorldState) -> None:
+    loot_log: list[dict[str, object]] = world.history_index["loot_remittance_log"]  # type: ignore[assignment]
+    events_by_step: dict[int, list[str]] = world.history_index["events_by_step"]  # type: ignore[assignment]
+    event_layers: dict[str, list[str]] = world.history_index["event_layers"]  # type: ignore[assignment]
+    for entry in loot_log:
+        if entry.get("step") != world.current_step or entry.get("materialized"):
+            continue
+        settlement = world.settlements.get(str(entry["winner_settlement_id"]))
+        event_id = world.next_id("event")
+        event = Event(
+            id=event_id,
+            event_type="LOOT_REMITTED",
+            timestamp_step=world.current_step,
+            location_tile_id=settlement.core_tile_id if settlement else None,
+            region_ref=None,
+            participant_ids=[str(entry["winner_polity_id"])],
+            cause_refs=[str(entry["war_id"])],
+            outcome_summary_code=f"captured={entry['captured_loot']}:remitted={entry['remitted_loot']}",
+            importance=48.0,
             visibility_scope="local",
             derived_memory_ids=[],
             derived_modifier_ids=[],

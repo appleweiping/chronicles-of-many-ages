@@ -66,6 +66,13 @@ def debug_grade_step_report(world: WorldState, step: int) -> list[str]:
             f"{entry.get('source_id')}->{entry.get('target_id')}:"
             f"{entry.get('template')}:x{entry.get('scale')}"
         )
+    local_command_log: list[dict[str, object]] = world.history_index["local_command_log"]  # type: ignore[assignment]
+    for entry in local_command_log[-5:]:
+        lines.append(
+            "local_command:"
+            f"{entry.get('executor_id')}:{entry.get('command_subject')}:"
+            f"{entry.get('mode')}:compliance={entry.get('compliance')}"
+        )
     belief_log: list[dict[str, object]] = world.history_index["belief_log"]  # type: ignore[assignment]
     for entry in belief_log[-5:]:
         lines.append(
@@ -79,6 +86,13 @@ def debug_grade_step_report(world: WorldState, step: int) -> list[str]:
             "memory_convert:"
             f"{entry.get('memory_id')}:{entry.get('npc_id')}:"
             f"{entry.get('belief_domain')}"
+        )
+    loot_log: list[dict[str, object]] = world.history_index["loot_remittance_log"]  # type: ignore[assignment]
+    for entry in loot_log[-5:]:
+        lines.append(
+            "loot_remit:"
+            f"{entry.get('war_id')}:{entry.get('winner_settlement_id')}:"
+            f"captured={entry.get('captured_loot')}:remitted={entry.get('remitted_loot')}"
         )
     return lines
 

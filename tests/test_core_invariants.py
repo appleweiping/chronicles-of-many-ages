@@ -10,15 +10,17 @@ from coma_engine.config.schema import default_config
 from coma_engine.actions.models import Action
 from coma_engine.core.transfers import (
     assign_npc_faction,
+    assign_npc_polity,
     assign_npc_settlement,
     assign_settlement_faction,
+    assign_settlement_polity,
     assign_settlement_tiles,
     move_npc_to_tile,
     reconcile_references,
     validate_reference_consistency,
 )
 from coma_engine.explain import debug_grade_action_explanations, player_grade_npc_summary
-from coma_engine.models.entities import Event, Faction, MemoryEntry, Settlement
+from coma_engine.models.entities import Event, Faction, MemoryEntry, RelationEntry, Settlement
 from coma_engine.player.interventions import queue_information_intervention, queue_npc_modifier_intervention
 from coma_engine.simulation.engine import SimulationEngine
 from coma_engine.simulation.phases import _declare_war, _found_polity, run_event_phase, run_political_phase, run_resolution_phase, run_resource_phase
@@ -174,6 +176,29 @@ class CoreInvariantTests(unittest.TestCase):
             any(entry["outcome"] == "delayed_no_executor" for entry in world.history_index["command_execution_log"])
         )
 
+    def test_command_chain_can_translate_into_skimming(self) -> None:
+        world = create_world(default_config(seed=39))
+        leader = max(world.npcs.values(), key=lambda npc: npc.office_rank)
+        _found_polity(world, leader.id, leader.settlement_id)
+        polity_id = next(iter(world.polities))
+        target_settlement_id = leader.settlement_id
+        target_settlement = world.settlements[target_settlement_id]
+        target_settlement.stored_resources = {"food": 10.0, "wood": 4.0, "ore": 1.0, "wealth": 16.0}
+        target_settlement.stability = 46.0
+        local_executor_id = next(npc_id for npc_id in target_settlement.resident_npc_ids if npc_id != leader.id)
+        assign_npc_faction(world, local_executor_id, None)
+        world.npcs[local_executor_id].office_rank = 1
+        world.npcs[local_executor_id].relationships[leader.id] = RelationEntry(
+            trust=6.0, fear=10.0, grievance=34.0, familiarity=10.0
+        )
+        before_treasury = world.polities[polity_id].treasury["wealth"]
+        packet_id = emit_command_packet(world, leader.id, target_settlement_id, "formal_tax_order")
+        world.history_index["packet_deliveries"][packet_id] = [local_executor_id]
+        run_political_phase(world.clone_for_phase(), world)
+        self.assertTrue(any(entry["mode"] == "skim" for entry in world.history_index["local_command_log"]))
+        self.assertGreater(world.polities[polity_id].treasury["wealth"], before_treasury)
+
+
     def test_children_do_not_count_as_full_labor_pool(self) -> None:
         world = create_world(default_config(seed=41))
         settlement = next(iter(world.settlements.values()))
@@ -253,6 +278,66 @@ class CoreInvariantTests(unittest.TestCase):
             polity = world.polities[polity_id]
             self.assertGreater(polity.legitimacy_components.get("war_strain", 0.0), 0.0)
             self.assertLessEqual(polity.treasury["food"], before[polity_id])
+
+    def test_war_loot_first_enters_settlement_then_partially_remits(self) -> None:
+        world = create_world(default_config(seed=45))
+        leader = max(world.npcs.values(), key=lambda npc: npc.office_rank)
+        _found_polity(world, leader.id, leader.settlement_id)
+        source_residents = [
+            npc.id
+            for npc in world.npcs.values()
+            if npc.settlement_id != leader.settlement_id and npc.id != leader.id
+        ][:3]
+        target_tile = next(
+            tile.id
+            for tile in world.tiles.values()
+            if tile.terrain_type == "plains" and tile.settlement_id is None
+        )
+        second_settlement_id = world.next_id("settlement")
+        world.settlements[second_settlement_id] = Settlement(
+            id=second_settlement_id,
+            name="Rival Port",
+            core_tile_id=target_tile,
+            member_tile_ids=[target_tile],
+            resident_npc_ids=[],
+            stored_resources={"food": 12.0, "wood": 5.0, "ore": 1.0, "wealth": 4.0},
+            security_level=48.0,
+            stability=56.0,
+            faction_id=None,
+            polity_id=None,
+            active_modifier_ids=[],
+            labor_pool=3.0,
+        )
+        assign_settlement_tiles(world, second_settlement_id, [target_tile])
+        for npc_id in source_residents:
+            move_npc_to_tile(world, npc_id, target_tile)
+            assign_npc_settlement(world, npc_id, second_settlement_id)
+        rival_faction_id = world.next_id("faction")
+        world.factions[rival_faction_id] = Faction(
+            id=rival_faction_id,
+            name="Harbor Circle",
+            leader_npc_id=source_residents[0],
+            member_npc_ids=[],
+            settlement_ids=[],
+            support_score=72.0,
+            cohesion=70.0,
+            agenda_type="survival",
+            legitimacy_seed_components={"support": 72.0},
+            active_modifier_ids=[],
+        )
+        for npc_id in source_residents:
+            assign_npc_faction(world, npc_id, rival_faction_id)
+        assign_settlement_faction(world, second_settlement_id, rival_faction_id)
+        rival_leader = world.npcs[source_residents[0]]
+        rival_leader.office_rank = 4
+        _found_polity(world, rival_leader.id, second_settlement_id)
+        polity_ids = list(world.polities)
+        _declare_war(world, polity_ids[0], polity_ids[1])
+        winner_capital_id = world.polities[polity_ids[0]].capital_settlement_id
+        before_local = world.settlements[winner_capital_id].stored_resources["wealth"]
+        run_political_phase(world.clone_for_phase(), world)
+        self.assertTrue(world.history_index["loot_remittance_log"])
+        self.assertGreaterEqual(world.settlements[winner_capital_id].stored_resources["wealth"], before_local)
 
     def test_player_grade_npc_summary_hides_raw_needs_dict(self) -> None:
         world = create_world(default_config(seed=47))
@@ -361,9 +446,10 @@ class CoreInvariantTests(unittest.TestCase):
         settlement.security_level = 20.0
         packet_id = emit_command_packet(world, leader.id, settlement.id, "suppress_unrest")
         world.history_index["packet_deliveries"][packet_id] = [resident_id]
+        before_security = settlement.security_level
         run_political_phase(world.clone_for_phase(), world)
         relation = world.npcs[resident_id].relationships[leader.id]
-        self.assertGreaterEqual(settlement.security_level, 30.0)
+        self.assertGreater(settlement.security_level, before_security)
         self.assertGreater(relation.fear, 0.0)
         self.assertGreater(relation.grievance, 0.0)
 

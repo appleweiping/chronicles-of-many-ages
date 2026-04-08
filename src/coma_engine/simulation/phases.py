@@ -66,6 +66,67 @@ def _polity_population_profile(world: WorldState, polity_id: str) -> dict[str, f
     return totals
 
 
+def _resource_value_rates() -> dict[str, float]:
+    return {"wealth": 1.0, "food": 0.2, "wood": 0.15, "ore": 0.25}
+
+
+def _extract_value_bundle(stock: dict[str, float], target_value: float) -> tuple[dict[str, float], float]:
+    extracted = {"food": 0.0, "wood": 0.0, "ore": 0.0, "wealth": 0.0}
+    remaining = max(0.0, target_value)
+    rates = _resource_value_rates()
+    for resource in ("wealth", "food", "wood", "ore"):
+        if remaining <= 0.0:
+            break
+        rate = rates[resource]
+        available = stock.get(resource, 0.0)
+        if available <= 0.0:
+            continue
+        max_value = available * rate
+        take_value = min(remaining, max_value)
+        take_amount = take_value / rate
+        stock[resource] = max(0.0, available - take_amount)
+        extracted[resource] += take_amount
+        remaining -= take_value
+    extracted_value = sum(extracted[resource] * rates[resource] for resource in extracted)
+    return extracted, extracted_value
+
+
+def _merge_resource_bundle(target: dict[str, float], incoming: dict[str, float], scale: float = 1.0) -> None:
+    for resource, amount in incoming.items():
+        target[resource] = target.get(resource, 0.0) + amount * scale
+
+
+def _executor_alignment_score(world: WorldState, executor_id: str, polity: Polity, settlement: Settlement) -> float:
+    executor = world.npcs[executor_id]
+    relation = executor.relationships.get(polity.ruler_npc_id, RelationEntry())
+    score = 45.0
+    score += relation.trust * 0.35
+    score += relation.fear * 0.15
+    score -= relation.grievance * 0.4
+    score += executor.office_rank * 3.0
+    score += settlement.stability * 0.1
+    if executor.faction_id and executor.faction_id == polity.ruling_faction_id:
+        score += 15.0
+    elif settlement.faction_id and settlement.faction_id != polity.ruling_faction_id:
+        score -= 12.0
+    return world.clamp_metric(score)
+
+
+def _translate_command_mode(world: WorldState, command_subject: str, alignment: float, packet_distortion: float) -> tuple[str, float, float]:
+    params = world.config.balance_parameters
+    effective_alignment = max(0.0, alignment - packet_distortion * 30.0)
+    compliance = max(0.15, min(1.0, effective_alignment / 100.0))
+    skim_rate = 0.0
+    if effective_alignment < params.command_resistance_threshold:
+        return "resist", compliance * 0.35, 0.0
+    if effective_alignment < params.command_skimming_threshold:
+        skim_rate = params.command_skim_base_rate + (params.command_skimming_threshold - effective_alignment) / 200.0
+        return "skim", compliance * 0.7, min(0.45, skim_rate)
+    if command_subject == "suppress_unrest" and effective_alignment < 65.0:
+        return "soften", compliance * 0.75, 0.0
+    return "comply", compliance, 0.0
+
+
 def run_environment_phase(snapshot: WorldState, working: WorldState) -> None:
     _activate_delayed_effects(working)
     for tile in working.tiles.values():
@@ -1147,12 +1208,24 @@ def run_political_phase(snapshot: WorldState, working: WorldState) -> None:
 
 
 def _archive_settlement(world: WorldState, settlement_id: str) -> None:
+    settlement = world.settlements[settlement_id]
+    if settlement.faction_id and settlement.faction_id in world.factions:
+        faction = world.factions[settlement.faction_id]
+        if settlement_id in faction.settlement_ids:
+            faction.settlement_ids.remove(settlement_id)
+    if settlement.polity_id and settlement.polity_id in world.polities:
+        polity = world.polities[settlement.polity_id]
+        if settlement_id in polity.member_settlement_ids:
+            polity.member_settlement_ids.remove(settlement_id)
     settlement = world.settlements.pop(settlement_id)
     world.archived_settlements[settlement_id] = settlement
     world.record_archived_state(settlement_id, "archived")
 
 
 def _archive_faction(world: WorldState, faction_id: str) -> None:
+    for polity in world.polities.values():
+        if faction_id in polity.member_faction_ids:
+            polity.member_faction_ids.remove(faction_id)
     faction = world.factions.pop(faction_id)
     world.archived_factions[faction_id] = faction
     world.record_archived_state(faction_id, "archived")
@@ -1169,6 +1242,7 @@ def _execute_command_chain(world: WorldState) -> None:
     executed_packets: set[str] = world.history_index["executed_command_packets"]  # type: ignore[assignment]
     command_subjects: dict[str, str] = world.history_index["command_packet_subjects"]  # type: ignore[assignment]
     command_execution_log: list[dict[str, object]] = world.history_index["command_execution_log"]  # type: ignore[assignment]
+    local_command_log: list[dict[str, object]] = world.history_index["local_command_log"]  # type: ignore[assignment]
     for packet in world.info_packets:
         if packet.content_domain != "command" or packet.id in executed_packets:
             continue
@@ -1202,6 +1276,10 @@ def _execute_command_chain(world: WorldState) -> None:
             )
             continue
         polity = world.polities[origin.polity_id]
+        primary_executor_id = max(
+            local_executors,
+            key=lambda npc_id: _executor_alignment_score(world, npc_id, polity, settlement),
+        )
         capital_tile_id = world.settlements[polity.capital_settlement_id].core_tile_id
         distance_cost = shortest_path_cost(world, capital_tile_id, settlement.core_tile_id)
         if distance_cost == float("inf"):
@@ -1212,34 +1290,66 @@ def _execute_command_chain(world: WorldState) -> None:
             local_resistance = world.factions[settlement.faction_id].cohesion * 0.2
         latency_penalty = polity.command_network_state.get("latency", 0.0) * 0.25
         execution_score = network_integrity + settlement.stability - distance_cost * 6.0 - local_resistance - latency_penalty
+        alignment = _executor_alignment_score(world, primary_executor_id, polity, settlement)
+        mode, compliance, skim_rate = _translate_command_mode(world, command_subject, alignment, packet.distortion)
+        local_command_log.append(
+            {
+                "step": world.current_step,
+                "packet_id": packet.id,
+                "executor_id": primary_executor_id,
+                "settlement_id": settlement.id,
+                "command_subject": command_subject,
+                "mode": mode,
+                "alignment": round(alignment, 2),
+                "compliance": round(compliance, 2),
+                "skim_rate": round(skim_rate, 2),
+            }
+        )
         outcome = "failed"
         if execution_score >= 55.0:
-            if command_subject == "formal_tax_order":
-                collected = settlement.current_taxable_output * max(0.15, min(0.65, execution_score / 100.0))
+            if mode == "resist":
+                polity.command_network_state["latency"] = min(100.0, polity.command_network_state.get("latency", 0.0) + 5.0)
+                settlement.stability = world.clamp_metric(settlement.stability - 1.0)
+                outcome = "resisted"
+            elif command_subject == "formal_tax_order":
+                target_value = settlement.current_taxable_output * max(0.15, min(0.65, execution_score / 100.0)) * compliance
+                extracted_bundle, extracted_value = _extract_value_bundle(settlement.stored_resources, target_value)
                 leakage = max(0.0, 1.0 - polity.administrative_reach / 100.0)
-                actual = collected * (1.0 - leakage)
-                polity.treasury["wealth"] = polity.treasury.get("wealth", 0.0) + actual
+                remitted_rate = max(0.0, (1.0 - leakage) * (1.0 - skim_rate))
+                _merge_resource_bundle(polity.treasury, extracted_bundle, remitted_rate)
+                _merge_resource_bundle(settlement.stored_resources, extracted_bundle, 1.0 - remitted_rate)
                 polity.tax_leakage_rate = leakage
                 for npc_id in local_executors[:3]:
                     apply_relation_template_between(world, npc_id, polity.ruler_npc_id, "extractive_taxation")
+                outcome = "executed_with_skimming" if skim_rate > 0.0 else "executed"
             elif command_subject == "resource_levy":
+                levy_bundle = {}
                 for resource in ("food", "wood", "ore"):
-                    extracted = settlement.stored_resources.get(resource, 0.0) * 0.15
+                    extracted = settlement.stored_resources.get(resource, 0.0) * 0.15 * compliance
                     settlement.stored_resources[resource] = settlement.stored_resources.get(resource, 0.0) - extracted
-                    polity.treasury[resource] = polity.treasury.get(resource, 0.0) + extracted
+                    levy_bundle[resource] = extracted
+                _merge_resource_bundle(polity.treasury, levy_bundle, 1.0 - skim_rate)
+                _merge_resource_bundle(settlement.stored_resources, levy_bundle, skim_rate)
                 for npc_id in local_executors[:3]:
                     apply_relation_template_between(world, npc_id, polity.ruler_npc_id, "extractive_taxation")
+                outcome = "executed_with_skimming" if skim_rate > 0.0 else "executed"
             elif command_subject == "muster_force":
                 profile = _settlement_population_profile(world, settlement.id)
-                combat_draw = max(0.0, min(profile["combat"] * 0.15, 2.0))
+                combat_draw = max(0.0, min(profile["combat"] * 0.15, 2.0)) * compliance
                 settlement.stored_resources["food"] = max(0.0, settlement.stored_resources.get("food", 0.0) - combat_draw * 0.8)
                 polity.military_strength_base = world.clamp_metric(polity.military_strength_base + combat_draw * 4.0)
                 polity.war_readiness = world.clamp_metric(polity.war_readiness + combat_draw * 8.0)
                 for npc_id in local_executors[:3]:
                     apply_relation_template_between(world, npc_id, polity.ruler_npc_id, "repression")
+                outcome = "softened" if mode == "soften" else "executed"
             elif command_subject == "suppress_unrest":
-                settlement.security_level = world.clamp_metric(settlement.security_level + 10.0)
-                settlement.stability = world.clamp_metric(settlement.stability + 4.0)
+                security_gain = 10.0 * compliance
+                stability_gain = 4.0 * compliance
+                if mode == "soften":
+                    security_gain *= 0.65
+                    stability_gain *= 0.75
+                settlement.security_level = world.clamp_metric(settlement.security_level + security_gain)
+                settlement.stability = world.clamp_metric(settlement.stability + stability_gain)
                 for npc_id in local_executors[:3]:
                     apply_relation_template_between(world, npc_id, polity.ruler_npc_id, "repression")
                 emit_info_packet(
@@ -1255,8 +1365,9 @@ def _execute_command_chain(world: WorldState) -> None:
                     truth_alignment=0.9,
                     propagation_channels=["spatial", "organizational"],
                 )
-            polity.command_network_state["latency"] = max(0.0, polity.command_network_state.get("latency", 0.0) - 2.0)
-            outcome = "executed"
+                outcome = "softened" if mode == "soften" else "executed"
+            if outcome != "resisted":
+                polity.command_network_state["latency"] = max(0.0, polity.command_network_state.get("latency", 0.0) - 2.0)
             executed_packets.add(packet.id)
         elif execution_score >= 40.0:
             packet.distortion = min(1.0, packet.distortion + 0.12)
@@ -1272,9 +1383,12 @@ def _execute_command_chain(world: WorldState) -> None:
                 "step": world.current_step,
                 "packet_id": packet.id,
                 "settlement_id": settlement.id,
+                "executor_id": primary_executor_id,
                 "command_subject": command_subject,
                 "outcome": outcome,
                 "score": round(execution_score, 2),
+                "mode": mode,
+                "compliance": round(compliance, 2),
             }
         )
 
@@ -1311,6 +1425,7 @@ def _update_taxation(world: WorldState) -> None:
 def _update_war_states(world: WorldState) -> None:
     war_log: list[dict[str, object]] = world.history_index["war_log"]  # type: ignore[assignment]
     legitimacy_log: list[dict[str, object]] = world.history_index["legitimacy_log"]  # type: ignore[assignment]
+    loot_remittance_log: list[dict[str, object]] = world.history_index["loot_remittance_log"]  # type: ignore[assignment]
     active_participants: set[str] = set()
     for war in world.war_states.values():
         if war.status != "active":
@@ -1340,8 +1455,22 @@ def _update_war_states(world: WorldState) -> None:
         loser = defender if winner is attacker else attacker
         loot = min(loser.treasury.get("wealth", 0.0), world.config.balance_parameters.war_loot_rate * max(1.0, war.effective_front_pressure))
         loser.treasury["wealth"] = max(0.0, loser.treasury.get("wealth", 0.0) - loot)
-        winner.treasury["wealth"] = winner.treasury.get("wealth", 0.0) + loot * 0.6
-        winner.treasury["food"] = winner.treasury.get("food", 0.0) + loot * 0.2
+        winner_capital = world.settlements[winner.capital_settlement_id]
+        winner_capital.stored_resources["wealth"] = winner_capital.stored_resources.get("wealth", 0.0) + loot
+        winner_capital.stored_resources["food"] = winner_capital.stored_resources.get("food", 0.0) + loot * 0.2
+        remitted = loot * world.config.balance_parameters.loot_remittance_rate * max(0.2, winner.administrative_reach / 100.0)
+        winner_capital.stored_resources["wealth"] = max(0.0, winner_capital.stored_resources.get("wealth", 0.0) - remitted)
+        winner.treasury["wealth"] = winner.treasury.get("wealth", 0.0) + remitted
+        loot_remittance_log.append(
+            {
+                "step": world.current_step,
+                "war_id": war.id,
+                "winner_polity_id": winner.id,
+                "winner_settlement_id": winner_capital.id,
+                "captured_loot": round(loot, 2),
+                "remitted_loot": round(remitted, 2),
+            }
+        )
         for polity, profile in ((attacker, attacker_profile), (defender, defender_profile)):
             fatigue_gain = 1.5 + war.expected_attrition + max(0.0, 12.0 - capital_distance) * 0.1
             war.war_fatigue_levels[polity.id] = min(100.0, war.war_fatigue_levels.get(polity.id, 0.0) + fatigue_gain)
@@ -1465,7 +1594,8 @@ def _update_polity_hysteresis(world: WorldState) -> None:
             or polity.administrative_reach < world.config.balance_parameters.polity_entry_reach * 0.5
         ):
             for settlement_id in list(polity.member_settlement_ids):
-                assign_settlement_polity(world, settlement_id, None)
+                if settlement_id in world.settlements:
+                    assign_settlement_polity(world, settlement_id, None)
             for npc in world.npcs.values():
                 if npc.polity_id == polity_id:
                     assign_npc_polity(world, npc.id, None)

@@ -114,6 +114,10 @@ class BalanceParameters:
     war_loot_rate: float = 0.08
     belief_signal_amplifier_scale: float = 0.5
     memory_conversion_threshold: float = 6.0
+    command_skim_base_rate: float = 0.18
+    command_resistance_threshold: float = 35.0
+    command_skimming_threshold: float = 55.0
+    loot_remittance_rate: float = 0.55
     relation_templates: dict[str, dict[str, float]] = field(
         default_factory=lambda: {
             "aid": {"debt": 12.0, "trust": 10.0, "affinity": 4.0},
