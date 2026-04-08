@@ -26,8 +26,11 @@ class WorldState:
     tiles: dict[str, Tile] = field(default_factory=dict)
     npcs: dict[str, NPC] = field(default_factory=dict)
     settlements: dict[str, Settlement] = field(default_factory=dict)
+    archived_settlements: dict[str, Settlement] = field(default_factory=dict)
     factions: dict[str, Faction] = field(default_factory=dict)
+    archived_factions: dict[str, Faction] = field(default_factory=dict)
     polities: dict[str, Polity] = field(default_factory=dict)
+    archived_polities: dict[str, Polity] = field(default_factory=dict)
     war_states: dict[str, WarState] = field(default_factory=dict)
     events: dict[str, Event] = field(default_factory=dict)
     memories: dict[str, MemoryEntry] = field(default_factory=dict)
@@ -52,6 +55,8 @@ class WorldState:
             },
             "action_explanations": {},
             "command_log": [],
+            "packet_deliveries": {},
+            "executed_command_packets": set(),
         }
     )
     phase_snapshot_buffer: dict[str, WorldState] = field(default_factory=dict)
@@ -84,8 +89,11 @@ class WorldState:
         self.tiles = other.tiles
         self.npcs = other.npcs
         self.settlements = other.settlements
+        self.archived_settlements = other.archived_settlements
         self.factions = other.factions
+        self.archived_factions = other.archived_factions
         self.polities = other.polities
+        self.archived_polities = other.archived_polities
         self.war_states = other.war_states
         self.events = other.events
         self.memories = other.memories
@@ -121,3 +129,21 @@ class WorldState:
     def record_dissolved_state(self, ref: str, state: str) -> None:
         dissolved: dict[str, str] = self.history_index["dissolved_entities"]  # type: ignore[assignment]
         dissolved[ref] = state
+
+    def entity_by_ref(self, ref: str) -> object | None:
+        registries: dict[str, dict[str, object]] = {
+            "tile": self.tiles,
+            "npc": self.npcs,
+            "settlement": self.settlements | self.archived_settlements,
+            "faction": self.factions | self.archived_factions,
+            "polity": self.polities | self.archived_polities,
+            "war": self.war_states,
+            "event": self.events,
+            "memory": self.memories,
+            "modifier": self.modifiers,
+        }
+        prefix = ref.split(":", 1)[0]
+        registry = registries.get(prefix)
+        if registry is None:
+            return None
+        return registry.get(ref)

@@ -3,7 +3,13 @@ from __future__ import annotations
 import argparse
 
 from coma_engine.config.schema import default_config
-from coma_engine.explain.service import player_grade_recent_history
+from coma_engine.explain import debug_grade_step_report, player_grade_recent_history, player_grade_world_summary
+from coma_engine.player.interventions import (
+    queue_information_intervention,
+    queue_miracle_intervention,
+    queue_npc_modifier_intervention,
+    queue_resource_modifier_intervention,
+)
 from coma_engine.simulation.engine import SimulationEngine
 from coma_engine.systems.generation import create_world
 
@@ -20,6 +26,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=8,
         help="How many recent events to print at the end.",
+    )
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Open a simple interactive shell after each step.",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show debug-grade action reports after each step.",
     )
     return parser
 
@@ -41,14 +57,14 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     for _ in range(args.steps):
         engine.step()
-        print(
-            f"Step {world.current_step}: "
-            f"settlements={len(world.settlements)} "
-            f"factions={len(world.factions)} "
-            f"polities={len(world.polities)} "
-            f"wars={len(world.war_states)} "
-            f"events={len(world.events)}"
-        )
+        for line in player_grade_world_summary(world):
+            print(line)
+        if args.debug:
+            for line in debug_grade_step_report(world, world.current_step - 1):
+                print(f"  {line}")
+        if args.interactive and not _interactive_shell(world):
+            break
+        print()
 
     print()
     print("Recent history:")
@@ -66,3 +82,84 @@ def run_cli(argv: list[str] | None = None) -> int:
             print(f"- {error}")
 
     return 0
+
+
+def _interactive_shell(world) -> bool:
+    print("Commands: step, map, npc <id>, settlement <id>, bless <npc_id>, resource <tile_or_settlement_id>, rumor <tile_id>, miracle <tile_id>, quit")
+    while True:
+        raw = input("coma> ").strip()
+        if not raw or raw == "step":
+            return True
+        if raw == "quit":
+            return False
+        if raw == "map":
+            _print_map(world)
+            continue
+        parts = raw.split()
+        if parts[0] == "npc" and len(parts) == 2 and parts[1] in world.npcs:
+            npc = world.npcs[parts[1]]
+            print(f"{npc.id} {npc.name} role={npc.role} tile={npc.location_tile_id} settlement={npc.settlement_id} faction={npc.faction_id} polity={npc.polity_id}")
+            print(f"needs={npc.needs}")
+            continue
+        if parts[0] == "settlement" and len(parts) == 2 and parts[1] in world.settlements:
+            settlement = world.settlements[parts[1]]
+            print(f"{settlement.id} {settlement.name} resources={settlement.stored_resources} residents={len(settlement.resident_npc_ids)} polity={settlement.polity_id}")
+            continue
+        if parts[0] == "bless" and len(parts) == 2 and parts[1] in world.npcs:
+            queue_npc_modifier_intervention(
+                world,
+                parts[1],
+                modifier_type="player_blessing",
+                domain="yield.food",
+                magnitude=1.0,
+                duration=3,
+            )
+            print("Queued NPC blessing.")
+            continue
+        if parts[0] == "resource" and len(parts) == 2:
+            queue_resource_modifier_intervention(
+                world,
+                parts[1],
+                modifier_type="abundance",
+                domain="yield.food",
+                magnitude=1.5,
+                duration=3,
+            )
+            print("Queued resource intervention.")
+            continue
+        if parts[0] == "rumor" and len(parts) == 2:
+            queue_information_intervention(
+                world,
+                content_domain="belief",
+                subject_ref=None,
+                location_ref=parts[1],
+                strength=25.0,
+            )
+            print("Queued information intervention.")
+            continue
+        if parts[0] == "miracle" and len(parts) == 2:
+            queue_miracle_intervention(
+                world,
+                event_type="PLAYER_MIRACLE",
+                location_ref=parts[1],
+                participant_ids=[],
+            )
+            print("Queued miracle intervention.")
+            continue
+        print("Unknown command.")
+
+
+def _print_map(world) -> None:
+    by_xy = {(tile.x, tile.y): tile for tile in world.tiles.values()}
+    height = world.config.balance_parameters.world_height
+    width = world.config.balance_parameters.world_width
+    symbols = {"plains": ".", "forest": "F", "hill": "H", "mountain": "M", "water": "~"}
+    for y in range(height):
+        row = []
+        for x in range(width):
+            tile = by_xy[(x, y)]
+            marker = symbols.get(tile.terrain_type, "?")
+            if tile.settlement_id:
+                marker = "S"
+            row.append(marker)
+        print("".join(row))

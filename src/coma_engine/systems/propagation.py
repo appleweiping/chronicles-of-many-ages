@@ -163,6 +163,7 @@ def _deliver_packet_to_npc(world: WorldState, npc: NPC, packet: InfoPacket) -> N
 
 def propagate_info_packets(world: WorldState) -> None:
     delivered_pairs: set[tuple[str, str]] = set()
+    packet_deliveries: dict[str, list[str]] = world.history_index["packet_deliveries"]  # type: ignore[assignment]
     for packet in world.info_packets:
         if packet.remaining_ttl <= 0 or packet.propagated_this_step:
             continue
@@ -196,6 +197,9 @@ def propagate_info_packets(world: WorldState) -> None:
             if pair in delivered_pairs:
                 continue
             delivered_pairs.add(pair)
+            packet_deliveries.setdefault(packet.id, [])
+            if recipient_id not in packet_deliveries[packet.id]:
+                packet_deliveries[packet.id].append(recipient_id)
             npc = world.npcs[recipient_id]
             if npc.alive:
                 _deliver_packet_to_npc(world, npc, packet)

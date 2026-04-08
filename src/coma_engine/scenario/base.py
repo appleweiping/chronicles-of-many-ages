@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 
 from coma_engine.config.schema import ConfigSchema
@@ -14,9 +15,7 @@ class ScenarioDefinition:
 
 
 def apply_scenario_config(base_config: ConfigSchema, scenario: ScenarioDefinition) -> ConfigSchema:
-    config = ConfigSchema(seed=base_config.seed)
-    config.design_constants = base_config.design_constants
-    config.balance_parameters = base_config.balance_parameters
+    config = deepcopy(base_config)
     for key, value in scenario.config_overrides.items():
         if hasattr(config.balance_parameters, key):
             setattr(config.balance_parameters, key, value)

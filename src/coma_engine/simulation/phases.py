@@ -17,11 +17,18 @@ from coma_engine.core.transfers import (
     validate_reference_consistency,
 )
 from coma_engine.models.entities import Faction, Polity, Settlement, WarState
+from coma_engine.models.perception import (
+    OpportunityPerception,
+    PowerMapPerception,
+    RecentEventPerception,
+    ResourceSignalPerception,
+    ThreatPerception,
+)
 from coma_engine.systems.events import materialize_outcomes
 from coma_engine.systems.modifiers import active_modifiers_for, apply_modifier_pipeline, tick_modifier_lifecycles
 from coma_engine.systems.propagation import emit_command_packet, emit_info_packet, propagate_info_packets
 from coma_engine.systems.relations import compute_group_salience
-from coma_engine.systems.spatial import traversable_neighbors
+from coma_engine.systems.spatial import shortest_path_cost, traversable_neighbors
 
 
 def run_environment_phase(snapshot: WorldState, working: WorldState) -> None:
@@ -93,7 +100,89 @@ def run_need_update_phase(snapshot: WorldState, working: WorldState) -> None:
 def run_information_phase(snapshot: WorldState, working: WorldState) -> None:
     for npc in working.npcs.values():
         npc.perceived_state.prune(working.current_step)
+        _refresh_local_perception(working, npc)
     propagate_info_packets(working)
+
+
+def _refresh_local_perception(world: WorldState, npc) -> None:
+    state = npc.perceived_state
+    expires = world.current_step + world.config.balance_parameters.default_perception_ttl
+    visible_tiles = [npc.location_tile_id, *traversable_neighbors(world, npc.location_tile_id)]
+    resource_entries = [
+        ResourceSignalPerception(
+            location_ref=tile_id,
+            resource_type="food",
+            abundance_signal=world.tiles[tile_id].current_stock.get("food", 0.0)
+            + world.tiles[tile_id].base_yield.get("food", 0.0) * 4.0,
+            source_ref=f"local:{tile_id}",
+            credibility=1.0,
+            expires_step=expires,
+        )
+        for tile_id in visible_tiles
+    ]
+    state.perceived_resource_signals = sorted(
+        resource_entries,
+        key=lambda entry: entry.abundance_signal,
+        reverse=True,
+    )[: world.config.balance_parameters.perception_channel_capacity]
+
+    threat_entries = [
+        ThreatPerception(
+            subject_ref=tile_id,
+            location_ref=tile_id,
+            threat_strength=world.tiles[tile_id].danger,
+            source_ref=f"local:{tile_id}",
+            credibility=1.0,
+            expires_step=expires,
+        )
+        for tile_id in visible_tiles
+    ]
+    state.perceived_threats = sorted(
+        threat_entries,
+        key=lambda entry: entry.threat_strength,
+        reverse=True,
+    )[: world.config.balance_parameters.perception_channel_capacity]
+
+    opportunity_entries = [
+        OpportunityPerception(
+            subject_ref=tile_id,
+            location_ref=tile_id,
+            opportunity_kind="forage" if tile_id == npc.location_tile_id else "move",
+            estimated_benefit=world.tiles[tile_id].base_yield.get("food", 0.0) * 10.0,
+            source_ref=f"local:{tile_id}",
+            credibility=1.0,
+            expires_step=expires,
+        )
+        for tile_id in visible_tiles
+    ]
+    state.perceived_opportunities = sorted(
+        opportunity_entries,
+        key=lambda entry: entry.estimated_benefit,
+        reverse=True,
+    )[: world.config.balance_parameters.perception_channel_capacity]
+
+    local_power: list[PowerMapPerception] = []
+    for other in world.npcs.values():
+        if other.location_tile_id in visible_tiles and other.id != npc.id:
+            power_score = other.office_rank * 15.0 + other.abilities.get("politics", 0.0) * 0.4
+            local_power.append(
+                PowerMapPerception(
+                    subject_ref=other.id,
+                    power_score=power_score,
+                    rank_hint=other.office_rank,
+                    source_ref="local_observation",
+                    credibility=1.0,
+                    expires_step=expires,
+                )
+            )
+    state.perceived_power_map = sorted(
+        local_power,
+        key=lambda entry: entry.power_score,
+        reverse=True,
+    )[: world.config.balance_parameters.perception_channel_capacity]
+    state.perceived_recent_events = state.perceived_recent_events[
+        : world.config.balance_parameters.perception_channel_capacity
+    ]
 
 
 def _availability_for(world: WorldState, npc_id: str, action_type: str, target_ref: str | None) -> bool:
@@ -125,9 +214,26 @@ def _availability_for(world: WorldState, npc_id: str, action_type: str, target_r
     return False
 
 
+def _perceived_resource_score(npc, location_ref: str | None) -> float:
+    if location_ref is None:
+        return 0.0
+    for entry in npc.perceived_state.perceived_resource_signals:
+        if entry.location_ref == location_ref:
+            return entry.abundance_signal
+    return 0.0
+
+
+def _perceived_threat_score(npc, location_ref: str | None) -> float:
+    if location_ref is None:
+        return 0.0
+    for entry in npc.perceived_state.perceived_threats:
+        if entry.location_ref == location_ref:
+            return entry.threat_strength
+    return 0.0
+
+
 def _score_action(world: WorldState, npc_id: str, action_type: str, target_ref: str | None) -> dict[str, float]:
     npc = world.npcs[npc_id]
-    tile = world.tiles[npc.location_tile_id]
     scores = {
         "need_gain": 0.0,
         "goal_progress": 0.0,
@@ -142,13 +248,13 @@ def _score_action(world: WorldState, npc_id: str, action_type: str, target_ref: 
     }
     if action_type == "FORAGE":
         scores["need_gain"] = npc.needs["food"] * 0.9
-        scores["path_cost"] = tile.effective_path_cost
-        scores["risk_penalty"] = tile.danger * 0.15
+        scores["path_cost"] = 1.0
+        scores["risk_penalty"] = _perceived_threat_score(npc, npc.location_tile_id) * 0.15
+        scores["belief_consistency"] = npc.beliefs.get("destiny", 0.0) * 0.05
     elif action_type == "MOVE" and target_ref:
-        target_tile = world.tiles[target_ref]
-        scores["need_gain"] = target_tile.base_yield.get("food", 0.0) * 12.0
-        scores["path_cost"] = target_tile.effective_path_cost * 6.0
-        scores["risk_penalty"] = target_tile.danger * 0.1
+        scores["need_gain"] = _perceived_resource_score(npc, target_ref) * 1.2
+        scores["path_cost"] = shortest_path_cost(world, npc.location_tile_id, target_ref) * 6.0
+        scores["risk_penalty"] = _perceived_threat_score(npc, target_ref) * 0.1
     elif action_type == "FOUND_POLITY":
         scores["goal_progress"] = 60.0 if npc.long_term_goal.goal_type == "FOUND_POLITY" else 25.0
         scores["belief_consistency"] = npc.beliefs.get("destiny", 0.0) * 0.4
@@ -195,9 +301,13 @@ def run_decision_phase(snapshot: WorldState, working: WorldState) -> None:
         if npc.current_action_ref and any(action.id == npc.current_action_ref for action in working.action_queue):
             continue
         npc.salience_scores = compute_group_salience(working, npc)
-        tile = working.tiles[npc.location_tile_id]
-        action_space = [("FORAGE", tile.id)]
-        for adjacent_id in tile.adjacent_tile_ids:
+        action_space = [("FORAGE", npc.location_tile_id)]
+        candidate_move_targets = {
+            entry.location_ref
+            for entry in npc.perceived_state.perceived_resource_signals
+            if entry.location_ref in traversable_neighbors(working, npc.location_tile_id)
+        }
+        for adjacent_id in candidate_move_targets:
             action_space.append(("MOVE", adjacent_id))
         if npc.settlement_id:
             action_space.append(("FOUND_POLITY", npc.settlement_id))
@@ -253,10 +363,33 @@ def run_declaration_phase(snapshot: WorldState, working: WorldState) -> None:
     unique_ids = set()
     deduped = []
     for action in working.action_queue:
-        if action.id not in unique_ids and action.status == ActionStatus.DECLARED.value:
+        if action.id not in unique_ids and action.status == ActionStatus.DECLARED.value and _validate_action_signature(action):
             unique_ids.add(action.id)
             deduped.append(action)
     working.action_queue = deduped
+
+
+def _validate_action_signature(action: Action) -> bool:
+    template = ACTION_TEMPLATES.get(action.action_type)
+    if template is None:
+        return False
+    signature = template.signature
+    target_values = {
+        "target_npc_id": action.target_npc_id,
+        "target_tile_id": action.target_tile_id,
+        "target_settlement_id": action.target_settlement_id,
+        "target_faction_id": action.target_faction_id,
+        "target_polity_id": action.target_polity_id,
+    }
+    for required in signature.required_targets:
+        if not target_values.get(required):
+            return False
+    for forbidden in signature.forbidden_targets:
+        if target_values.get(forbidden):
+            return False
+    if not signature.allow_targetless and not any(target_values.values()) and not signature.required_targets:
+        return False
+    return True
 
 
 def run_resolution_phase(snapshot: WorldState, working: WorldState) -> None:
@@ -315,18 +448,24 @@ def _contest_resolution(working: WorldState, actions: list[Action]) -> list[tupl
 def _effect_application(working: WorldState, resolved: list[tuple[Action, ContestScore, str]]) -> None:
     working.outcome_records = []
     for action, _score, result in resolved:
-        if result == "succeeded":
+        outcome_result = result
+        if result == "succeeded" and action.duration_type != "instant" and action.estimated_duration > 1:
+            _emit_continuation_leak(working, action)
+            action.status = ActionStatus.DECLARED.value
+            outcome_result = "partial"
+        elif result == "succeeded":
             _apply_success(working, action)
-            action.status = ActionStatus.SUCCEEDED.value if action.estimated_duration <= 1 else ActionStatus.DECLARED.value
+            action.status = ActionStatus.SUCCEEDED.value
         else:
-            action.status = ActionStatus.FAILED.value
+            action.status = ActionStatus.INTERRUPTED.value if action.duration_type != "instant" else ActionStatus.FAILED.value
+            outcome_result = "interrupted" if action.duration_type != "instant" else "failed"
         working.outcome_records.append(
             ActionOutcome(
                 action_id=action.id,
                 action_type=action.action_type,
                 actor_id=action.actor_id,
-                result=result,
-                summary_code=f"{action.action_type.lower()}_{result}",
+                result=outcome_result,
+                summary_code=f"{action.action_type.lower()}_{outcome_result}",
                 participant_ids=[action.actor_id],
                 cause_refs=[],
                 target_refs=[
@@ -343,6 +482,30 @@ def _effect_application(working: WorldState, resolved: list[tuple[Action, Contes
                 resource_delta=dict(action.resource_cost),
             )
         )
+
+
+def _emit_continuation_leak(working: WorldState, action: Action) -> None:
+    if action.duration_type not in {"travel", "campaign", "scheme", "channeling"}:
+        return
+    actor = working.npcs[action.actor_id]
+    location_ref = actor.location_tile_id
+    if action.target_tile_id:
+        location_ref = action.target_tile_id
+    elif action.target_settlement_id and action.target_settlement_id in working.settlements:
+        location_ref = working.settlements[action.target_settlement_id].core_tile_id
+    emit_info_packet(
+        working,
+        source_event_id=None,
+        origin_actor_id=actor.id,
+        content_domain="event",
+        subject_ref=action.action_type,
+        location_ref=location_ref,
+        strength=18.0,
+        visibility_scope="local",
+        ttl=working.config.balance_parameters.rumor_base_ttl,
+        truth_alignment=0.85,
+        propagation_channels=["spatial", "relationship"],
+    )
 
 
 def _apply_success(working: WorldState, action: Action) -> None:
@@ -441,25 +604,128 @@ def _declare_war(working: WorldState, attacker_polity_id: str, defender_polity_i
 
 
 def _cleanup_and_hooks(working: WorldState) -> None:
+    for action in working.action_queue:
+        if action.status == ActionStatus.DECLARED.value and action.estimated_duration > 1:
+            action.estimated_duration -= 1
     active_ids = {action.id for action in working.action_queue if action.status == ActionStatus.DECLARED.value}
     for npc in working.npcs.values():
         if npc.current_action_ref and npc.current_action_ref not in active_ids:
             npc.current_action_ref = None
-    for action in working.action_queue:
-        if action.status == ActionStatus.DECLARED.value and action.estimated_duration > 1:
-            action.estimated_duration -= 1
     working.action_queue = [
-        action for action in working.action_queue if action.status in {ActionStatus.DECLARED.value, ActionStatus.RESERVED.value}
+        action for action in working.action_queue if action.status == ActionStatus.DECLARED.value
     ]
 
 
 def run_political_phase(snapshot: WorldState, working: WorldState) -> None:
+    _execute_command_chain(working)
+    _update_taxation(working)
+    _update_war_states(working)
     _update_settlement_hysteresis(working)
     _update_faction_hysteresis(working)
     _update_polity_hysteresis(working)
     reconcile_references(working)
     for error in validate_reference_consistency(working):
         working.log_error(error)
+
+
+def _archive_settlement(world: WorldState, settlement_id: str) -> None:
+    settlement = world.settlements.pop(settlement_id)
+    world.archived_settlements[settlement_id] = settlement
+    world.record_archived_state(settlement_id, "archived")
+
+
+def _archive_faction(world: WorldState, faction_id: str) -> None:
+    faction = world.factions.pop(faction_id)
+    world.archived_factions[faction_id] = faction
+    world.record_archived_state(faction_id, "archived")
+
+
+def _archive_polity(world: WorldState, polity_id: str) -> None:
+    polity = world.polities.pop(polity_id)
+    world.archived_polities[polity_id] = polity
+    world.record_dissolved_state(polity_id, "dissolved")
+
+
+def _execute_command_chain(world: WorldState) -> None:
+    packet_deliveries: dict[str, list[str]] = world.history_index["packet_deliveries"]  # type: ignore[assignment]
+    executed_packets: set[str] = world.history_index["executed_command_packets"]  # type: ignore[assignment]
+    for packet in world.info_packets:
+        if packet.content_domain != "command" or packet.id in executed_packets:
+            continue
+        if packet.subject_ref not in world.settlements:
+            continue
+        settlement = world.settlements[packet.subject_ref]
+        origin = world.npcs.get(packet.origin_actor_id) if packet.origin_actor_id else None
+        if origin is None or origin.polity_id is None or settlement.polity_id != origin.polity_id:
+            continue
+        delivered_npcs = packet_deliveries.get(packet.id, [])
+        local_executors = [
+            npc_id
+            for npc_id in delivered_npcs
+            if npc_id in world.npcs
+            and world.npcs[npc_id].settlement_id == settlement.id
+            and world.npcs[npc_id].polity_id == origin.polity_id
+        ]
+        if not local_executors:
+            continue
+        polity = world.polities[origin.polity_id]
+        capital_tile_id = world.settlements[polity.capital_settlement_id].core_tile_id
+        distance_cost = shortest_path_cost(world, capital_tile_id, settlement.core_tile_id)
+        if distance_cost == float("inf"):
+            continue
+        network_integrity = polity.command_network_state.get("integrity", 50.0)
+        local_resistance = 0.0
+        if settlement.faction_id and settlement.faction_id != polity.ruling_faction_id:
+            local_resistance = world.factions[settlement.faction_id].cohesion * 0.2
+        execution_score = network_integrity + settlement.stability - distance_cost * 6.0 - local_resistance
+        if execution_score >= 45.0:
+            collected = settlement.current_taxable_output * max(0.15, min(0.65, execution_score / 100.0))
+            leakage = max(0.0, 1.0 - polity.administrative_reach / 100.0)
+            actual = collected * (1.0 - leakage)
+            polity.treasury["wealth"] = polity.treasury.get("wealth", 0.0) + actual
+            polity.tax_leakage_rate = leakage
+            executed_packets.add(packet.id)
+        else:
+            polity.command_network_state["latency"] = min(100.0, polity.command_network_state.get("latency", 0.0) + 5.0)
+
+
+def _update_taxation(world: WorldState) -> None:
+    for settlement in world.settlements.values():
+        settlement.current_taxable_output = 0.0
+        produced = (
+            settlement.stored_resources.get("food", 0.0) * 0.2
+            + settlement.stored_resources.get("wood", 0.0) * 0.15
+            + settlement.stored_resources.get("ore", 0.0) * 0.25
+            + settlement.stored_resources.get("wealth", 0.0)
+        )
+        settlement.current_taxable_output = produced
+        if settlement.polity_id and settlement.polity_id in world.polities:
+            polity = world.polities[settlement.polity_id]
+            distance_cost = shortest_path_cost(
+                world,
+                world.settlements[polity.capital_settlement_id].core_tile_id,
+                settlement.core_tile_id,
+            )
+            polity.administrative_reach = world.clamp_metric(70.0 - distance_cost * 4.0)
+
+
+def _update_war_states(world: WorldState) -> None:
+    for war in world.war_states.values():
+        if war.status != "active":
+            continue
+        participants = [world.polities[polity_id] for polity_id in war.participant_polity_ids if polity_id in world.polities]
+        if len(participants) < 2:
+            war.status = "ended"
+            continue
+        average_strength = sum(polity.military_strength_base for polity in participants) / len(participants)
+        war.effective_front_pressure = average_strength * 0.1
+        war.expected_attrition = 2.0 + len(participants)
+        war.escalation_risk = min(100.0, war.effective_front_pressure + sum(war.war_fatigue_levels.values()) * 0.2)
+        for polity in participants:
+            war.war_fatigue_levels[polity.id] = min(100.0, war.war_fatigue_levels.get(polity.id, 0.0) + 2.0)
+            polity.stability = world.clamp_metric(polity.stability - 1.5)
+            polity.legitimacy_components["war_strain"] = polity.legitimacy_components.get("war_strain", 0.0) + 2.0
+            polity.treasury["wealth"] = max(0.0, polity.treasury.get("wealth", 0.0) - 0.5)
 
 
 def _update_settlement_hysteresis(world: WorldState) -> None:
@@ -493,10 +759,9 @@ def _update_settlement_hysteresis(world: WorldState) -> None:
     for settlement_id, settlement in list(world.settlements.items()):
         living_residents = [npc_id for npc_id in settlement.resident_npc_ids if world.npcs[npc_id].alive]
         if len(living_residents) <= exit_threshold:
-            world.record_archived_state(settlement_id, "archived")
             for npc_id in list(settlement.resident_npc_ids):
                 assign_npc_settlement(world, npc_id, None)
-            del world.settlements[settlement_id]
+            _archive_settlement(world, settlement_id)
 
 
 def _update_faction_hysteresis(world: WorldState) -> None:
@@ -524,10 +789,9 @@ def _update_faction_hysteresis(world: WorldState) -> None:
         elif settlement.faction_id:
             faction = world.factions.get(settlement.faction_id)
             if faction and (faction.support_score < exit or faction.cohesion < exit):
-                world.record_archived_state(faction.id, "archived")
                 for npc_id in list(faction.member_npc_ids):
                     assign_npc_faction(world, npc_id, None)
-                del world.factions[faction.id]
+                _archive_faction(world, faction.id)
                 settlement.faction_id = None
 
 
@@ -537,13 +801,12 @@ def _update_polity_hysteresis(world: WorldState) -> None:
             polity.stability < world.config.balance_parameters.polity_exit_stability
             or polity.administrative_reach < world.config.balance_parameters.polity_entry_reach * 0.5
         ):
-            world.record_dissolved_state(polity_id, "dissolved")
             for settlement_id in list(polity.member_settlement_ids):
                 assign_settlement_polity(world, settlement_id, None)
             for npc in world.npcs.values():
                 if npc.polity_id == polity_id:
                     assign_npc_polity(world, npc.id, None)
-            del world.polities[polity_id]
+            _archive_polity(world, polity_id)
 
 
 def run_event_phase(snapshot: WorldState, working: WorldState) -> None:

@@ -8,10 +8,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from coma_engine.config.schema import default_config
 from coma_engine.core.transfers import move_npc_to_tile, reconcile_references, validate_reference_consistency
-from coma_engine.explain.service import debug_grade_action_explanations
+from coma_engine.explain import debug_grade_action_explanations
 from coma_engine.player.interventions import queue_information_intervention, queue_npc_modifier_intervention
 from coma_engine.simulation.engine import SimulationEngine
+from coma_engine.simulation.phases import _found_polity, run_political_phase
 from coma_engine.systems.generation import create_world
+from coma_engine.systems.propagation import emit_command_packet
 
 
 class CoreInvariantTests(unittest.TestCase):
@@ -85,6 +87,30 @@ class CoreInvariantTests(unittest.TestCase):
         SimulationEngine(world).step()
         self.assertTrue(world.modifiers)
         self.assertTrue(world.info_packets)
+
+    def test_archived_settlement_remains_resolvable(self) -> None:
+        world = create_world(default_config(seed=23))
+        settlement_id = next(iter(world.settlements))
+        settlement = world.settlements[settlement_id]
+        for npc_id in list(settlement.resident_npc_ids):
+            world.npcs[npc_id].alive = False
+        SimulationEngine(world).step()
+        self.assertIn(settlement_id, world.archived_settlements)
+        self.assertIsNotNone(world.entity_by_ref(settlement_id))
+
+    def test_command_packet_drives_tax_execution(self) -> None:
+        world = create_world(default_config(seed=29))
+        leader = max(world.npcs.values(), key=lambda npc: npc.office_rank)
+        _found_polity(world, leader.id, leader.settlement_id)
+        polity = next(iter(world.polities.values()))
+        settlement = world.settlements[leader.settlement_id]
+        settlement.stored_resources["wealth"] = 30.0
+        settlement.current_taxable_output = 20.0
+        initial = polity.treasury["wealth"]
+        packet_id = emit_command_packet(world, leader.id, settlement.id, "formal_tax_order")
+        world.history_index["packet_deliveries"][packet_id] = [leader.id]
+        run_political_phase(world.clone_for_phase(), world)
+        self.assertGreater(polity.treasury["wealth"], initial)
 
 
 if __name__ == "__main__":
