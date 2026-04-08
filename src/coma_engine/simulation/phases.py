@@ -18,17 +18,19 @@ from coma_engine.core.transfers import (
 )
 from coma_engine.models.entities import Faction, Goal, NPC, Polity, RelationEntry, Settlement, WarState
 from coma_engine.models.perception import (
+    BeliefSignalPerception,
     OpportunityPerception,
     PerceivedState,
     PowerMapPerception,
     RecentEventPerception,
+    RelationShiftPerception,
     ResourceSignalPerception,
     ThreatPerception,
 )
 from coma_engine.systems.events import materialize_outcomes
 from coma_engine.systems.modifiers import active_modifiers_for, apply_modifier_pipeline, tick_modifier_lifecycles
 from coma_engine.systems.propagation import emit_command_packet, emit_info_packet, propagate_info_packets
-from coma_engine.systems.relations import compute_group_salience
+from coma_engine.systems.relations import apply_relation_template_between, compute_group_salience
 from coma_engine.systems.spatial import shortest_path_cost, traversable_neighbors
 
 
@@ -315,6 +317,42 @@ def _refresh_local_perception(world: WorldState, npc) -> None:
         key=lambda entry: entry.power_score,
         reverse=True,
     )[: world.config.balance_parameters.perception_channel_capacity]
+    relation_log: list[dict[str, object]] = world.history_index["relation_log"]  # type: ignore[assignment]
+    relation_entries = [
+        RelationShiftPerception(
+            subject_ref=str(entry["target_id"]),
+            summary_code=str(entry["template"]),
+            delta_strength=float(entry["scale"]) * 10.0,
+            source_ref=f"relation:{entry['source_id']}",
+            credibility=1.0,
+            expires_step=expires,
+        )
+        for entry in relation_log[-12:]
+        if entry["source_id"] == npc.id or entry["target_id"] == npc.id
+    ]
+    state.perceived_relations_shift = relation_entries[: world.config.balance_parameters.perception_channel_capacity]
+    belief_entries: list[BeliefSignalPerception] = []
+    if npc.polity_id and npc.polity_id in world.polities:
+        polity = world.polities[npc.polity_id]
+        belief_entries.append(
+            BeliefSignalPerception(
+                belief_domain="legitimacy_form",
+                signal_strength=polity.legitimacy_components.get("support", 0.0),
+                source_ref=f"polity:{polity.id}",
+                credibility=1.0,
+                expires_step=expires,
+            )
+        )
+        belief_entries.append(
+            BeliefSignalPerception(
+                belief_domain="destiny",
+                signal_strength=max(0.0, 60.0 - polity.legitimacy_components.get("war_strain", 0.0)),
+                source_ref=f"polity:{polity.id}:war_strain",
+                credibility=0.8,
+                expires_step=expires,
+            )
+        )
+    state.perceived_belief_signals = belief_entries[: world.config.balance_parameters.perception_channel_capacity]
     state.perceived_recent_events = state.perceived_recent_events[
         : world.config.balance_parameters.perception_channel_capacity
     ]
@@ -416,6 +454,14 @@ def _availability_decision(world: WorldState, npc_id: str, action_type: str, tar
             and world.settlements[target_ref].polity_id == npc.polity_id
         )
         return AvailabilityDecision(allowed, "muster_force" if allowed else "muster_force_unavailable")
+    if action_type == "SUPPRESS_UNREST":
+        allowed = (
+            npc.polity_id is not None
+            and npc.office_rank >= world.config.balance_parameters.low_rank_high_politics_gate_rank
+            and target_ref in world.settlements
+            and world.settlements[target_ref].polity_id == npc.polity_id
+        )
+        return AvailabilityDecision(allowed, "suppress_unrest" if allowed else "suppress_unrest_unavailable")
     if action_type == "DECLARE_WAR":
         allowed = (
             npc.polity_id is not None
@@ -459,6 +505,8 @@ def _action_resource_cost(action_type: str) -> dict[str, float]:
         return {"food": 0.5, "wood": 0.0, "ore": 0.0, "wealth": 1.0}
     if action_type == "MUSTER_FORCE":
         return {"food": 0.6, "wood": 0.2, "ore": 0.1, "wealth": 0.4}
+    if action_type == "SUPPRESS_UNREST":
+        return {"food": 0.3, "wood": 0.1, "ore": 0.0, "wealth": 0.4}
     return {"food": 0.0, "wood": 0.0, "ore": 0.0, "wealth": 0.0}
 
 
@@ -478,6 +526,22 @@ def _perceived_threat_score(npc, location_ref: str | None) -> float:
         if entry.location_ref == location_ref:
             return entry.threat_strength
     return 0.0
+
+
+def _perceived_belief_score(npc, belief_domain: str) -> float:
+    total = 0.0
+    for entry in npc.perceived_state.perceived_belief_signals:
+        if entry.belief_domain == belief_domain:
+            total += entry.signal_strength * entry.credibility
+    return total
+
+
+def _perceived_recent_event_score(npc, summary_code: str) -> float:
+    total = 0.0
+    for entry in npc.perceived_state.perceived_recent_events:
+        if entry.summary_code == summary_code:
+            total += entry.importance * entry.credibility
+    return total
 
 
 def _score_action(world: WorldState, npc_id: str, action_type: str, target_ref: str | None) -> dict[str, float]:
@@ -513,6 +577,7 @@ def _score_action(world: WorldState, npc_id: str, action_type: str, target_ref: 
         scores["need_gain"] = _perceived_resource_score(npc, target_ref) * 0.25
         scores["path_cost"] = shortest_path_cost(world, npc.location_tile_id, target_ref) * 4.0
         scores["risk_penalty"] = _perceived_threat_score(npc, target_ref) * 0.2
+        scores["goal_progress"] += _perceived_recent_event_score(npc, "event") * 0.15
     elif action_type == "MIGRATE" and target_ref:
         scores["need_gain"] = _perceived_resource_score(npc, target_ref) * 0.8 + npc.needs["safety"] * 0.35
         scores["path_cost"] = shortest_path_cost(world, npc.location_tile_id, target_ref) * 8.0
@@ -526,6 +591,7 @@ def _score_action(world: WorldState, npc_id: str, action_type: str, target_ref: 
     elif action_type == "FOUND_POLITY":
         scores["goal_progress"] = 60.0 if npc.long_term_goal.goal_type == "FOUND_POLITY" else 25.0
         scores["belief_consistency"] = npc.beliefs.get("destiny", 0.0) * 0.4
+        scores["belief_consistency"] += _perceived_belief_score(npc, "legitimacy_form") * 0.1
         scores["risk_penalty"] = 25.0
         scores["organization_conflict_cost"] = max(0.0, 50.0 - compute_group_salience(world, npc)["faction"])
     elif action_type == "FORMAL_TAX_ORDER":
@@ -542,6 +608,11 @@ def _score_action(world: WorldState, npc_id: str, action_type: str, target_ref: 
         scores["goal_progress"] = 26.0
         scores["organization_conflict_cost"] = 18.0
         scores["resource_cost"] = 8.0
+    elif action_type == "SUPPRESS_UNREST":
+        scores["goal_progress"] = 20.0 + npc.needs["safety"] * 0.2
+        scores["organization_conflict_cost"] = 12.0
+        scores["risk_penalty"] = 5.0
+        scores["belief_consistency"] = npc.beliefs.get("legitimacy_form", 0.0) * 0.08
     return scores
 
 
@@ -598,6 +669,7 @@ def run_decision_phase(snapshot: WorldState, working: WorldState) -> None:
             action_space.append(("FORMAL_TAX_ORDER", npc.settlement_id))
             action_space.append(("LEVY_RESOURCES", npc.settlement_id))
             action_space.append(("MUSTER_FORCE", npc.settlement_id))
+            action_space.append(("SUPPRESS_UNREST", npc.settlement_id))
         if npc.polity_id:
             for polity_id in sorted(visible_polities):
                 if polity_id != npc.polity_id:
@@ -965,6 +1037,9 @@ def _apply_success(working: WorldState, action: Action) -> None:
             source_settlement.stored_resources["wealth"] = source_settlement.stored_resources.get("wealth", 0.0) + 0.8
             target_settlement.stored_resources["food"] = target_settlement.stored_resources.get("food", 0.0) + shipped_food
             target_settlement.stored_resources["wealth"] = target_settlement.stored_resources.get("wealth", 0.0) + 0.4
+            if target_settlement.resident_npc_ids:
+                counterpart_id = target_settlement.resident_npc_ids[0]
+                apply_relation_template_between(working, actor.id, counterpart_id, "shared_work", reciprocal="shared_work")
     elif action.action_type == "MIGRATE" and action.target_tile_id:
         move_npc_to_tile(working, actor.id, action.target_tile_id)
         destination_settlement = working.tiles[action.target_tile_id].settlement_id
@@ -980,6 +1055,8 @@ def _apply_success(working: WorldState, action: Action) -> None:
         _declare_war(working, actor.polity_id, action.target_polity_id)
     elif action.action_type == "MUSTER_FORCE" and action.target_settlement_id:
         emit_command_packet(working, actor.id, action.target_settlement_id, "muster_force")
+    elif action.action_type == "SUPPRESS_UNREST" and action.target_settlement_id:
+        emit_command_packet(working, actor.id, action.target_settlement_id, "suppress_unrest")
 
 
 def _found_polity(working: WorldState, actor_id: str, settlement_id: str) -> None:
@@ -1143,17 +1220,41 @@ def _execute_command_chain(world: WorldState) -> None:
                 actual = collected * (1.0 - leakage)
                 polity.treasury["wealth"] = polity.treasury.get("wealth", 0.0) + actual
                 polity.tax_leakage_rate = leakage
+                for npc_id in local_executors[:3]:
+                    apply_relation_template_between(world, npc_id, polity.ruler_npc_id, "extractive_taxation")
             elif command_subject == "resource_levy":
                 for resource in ("food", "wood", "ore"):
                     extracted = settlement.stored_resources.get(resource, 0.0) * 0.15
                     settlement.stored_resources[resource] = settlement.stored_resources.get(resource, 0.0) - extracted
                     polity.treasury[resource] = polity.treasury.get(resource, 0.0) + extracted
+                for npc_id in local_executors[:3]:
+                    apply_relation_template_between(world, npc_id, polity.ruler_npc_id, "extractive_taxation")
             elif command_subject == "muster_force":
                 profile = _settlement_population_profile(world, settlement.id)
                 combat_draw = max(0.0, min(profile["combat"] * 0.15, 2.0))
                 settlement.stored_resources["food"] = max(0.0, settlement.stored_resources.get("food", 0.0) - combat_draw * 0.8)
                 polity.military_strength_base = world.clamp_metric(polity.military_strength_base + combat_draw * 4.0)
                 polity.war_readiness = world.clamp_metric(polity.war_readiness + combat_draw * 8.0)
+                for npc_id in local_executors[:3]:
+                    apply_relation_template_between(world, npc_id, polity.ruler_npc_id, "repression")
+            elif command_subject == "suppress_unrest":
+                settlement.security_level = world.clamp_metric(settlement.security_level + 10.0)
+                settlement.stability = world.clamp_metric(settlement.stability + 4.0)
+                for npc_id in local_executors[:3]:
+                    apply_relation_template_between(world, npc_id, polity.ruler_npc_id, "repression")
+                emit_info_packet(
+                    world,
+                    source_event_id=None,
+                    origin_actor_id=polity.ruler_npc_id,
+                    content_domain="relations",
+                    subject_ref=settlement.id,
+                    location_ref=settlement.core_tile_id,
+                    strength=32.0,
+                    visibility_scope="local",
+                    ttl=world.config.balance_parameters.rumor_base_ttl,
+                    truth_alignment=0.9,
+                    propagation_channels=["spatial", "organizational"],
+                )
             polity.command_network_state["latency"] = max(0.0, polity.command_network_state.get("latency", 0.0) - 2.0)
             outcome = "executed"
             executed_packets.add(packet.id)

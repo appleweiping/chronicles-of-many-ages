@@ -7,6 +7,7 @@ from coma_engine.models.perception import (
     OpportunityPerception,
     PowerMapPerception,
     RecentEventPerception,
+    RelationShiftPerception,
     ResourceSignalPerception,
     ThreatPerception,
 )
@@ -111,11 +112,25 @@ def _deliver_packet_to_npc(world: WorldState, npc: NPC, packet: InfoPacket) -> N
             capacity,
         )
     elif packet.content_domain == "belief":
+        amplifier = 1.0 + (npc.beliefs.get("miracle_credibility", 0.0) / 100.0) * world.config.balance_parameters.belief_signal_amplifier_scale
         _append_capped(
             state.perceived_belief_signals,
             BeliefSignalPerception(
-                belief_domain="miracle_credibility",
-                signal_strength=packet.strength,
+                belief_domain=(packet.subject_ref or "miracle_credibility"),
+                signal_strength=packet.strength * amplifier,
+                source_ref=packet.id,
+                credibility=1.0 - packet.distortion,
+                expires_step=expires,
+            ),
+            capacity,
+        )
+    elif packet.content_domain == "relations":
+        _append_capped(
+            state.perceived_relations_shift,
+            RelationShiftPerception(
+                subject_ref=packet.subject_ref or "unknown",
+                summary_code="observed_relation_shift",
+                delta_strength=packet.strength,
                 source_ref=packet.id,
                 credibility=1.0 - packet.distortion,
                 expires_step=expires,

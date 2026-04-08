@@ -112,6 +112,18 @@ class BalanceParameters:
     peace_tension_gain: float = 0.8
     war_strain_decay: float = 0.6
     war_loot_rate: float = 0.08
+    belief_signal_amplifier_scale: float = 0.5
+    memory_conversion_threshold: float = 6.0
+    relation_templates: dict[str, dict[str, float]] = field(
+        default_factory=lambda: {
+            "aid": {"debt": 12.0, "trust": 10.0, "affinity": 4.0},
+            "betrayal": {"trust": -20.0, "grievance": 18.0, "fear": 8.0},
+            "shared_work": {"familiarity": 5.0, "trust": 2.0},
+            "repression": {"fear": 16.0, "grievance": 14.0},
+            "good_governance": {"trust": 6.0, "affinity": 4.0},
+            "extractive_taxation": {"grievance": 10.0, "affinity": -5.0},
+        }
+    )
     path_costs: dict[TerrainType, float] = field(
         default_factory=lambda: {
             "plains": 1.0,

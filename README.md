@@ -40,6 +40,8 @@ This repository implements the first-pass formal systems foundation described in
 - First-pass continuous-action semantics for partial progress, interruption, and outcome recording
 - First-pass demographic loop with aging, birth/death records, and labor/combat population separation
 - First-pass war loop with attrition, strain, loot transfer, and peace-tension feedback
+- Relation templates now enter execution outcomes and command-chain consequences
+- Memory conversion now feeds back into formal belief-signal propagation instead of disappearing as dead data
 - Formal player intervention queue restricted to approved channels
 - Core invariant tests for replayability, reference consistency, political gating, phase snapshots, action interruption, and command-chain delay
 

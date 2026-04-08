@@ -23,6 +23,8 @@ EVENT_TYPE_MAP: dict[tuple[str, str], tuple[str, str, str]] = {
     ("DECLARE_WAR", "succeeded"): ("WAR_DECLARED", "war_declared", HistoricalLayer.CIVILIZATION_NODE.value),
     ("MUSTER_FORCE", "succeeded"): ("FORCE_MUSTER_ORDERED", "muster_force_ordered", HistoricalLayer.LOCAL_CHRONICLE.value),
     ("MUSTER_FORCE", "partial"): ("FORCE_MUSTER_UNDERWAY", "muster_force_partial", HistoricalLayer.LOCAL_CHRONICLE.value),
+    ("SUPPRESS_UNREST", "succeeded"): ("UNREST_SUPPRESSED", "suppress_unrest_success", HistoricalLayer.LOCAL_CHRONICLE.value),
+    ("SUPPRESS_UNREST", "partial"): ("UNREST_SUPPRESSION_UNDERWAY", "suppress_unrest_partial", HistoricalLayer.LOCAL_CHRONICLE.value),
 }
 
 
@@ -62,6 +64,7 @@ def materialize_outcomes(world: WorldState) -> None:
     _materialize_demographics(world)
     _materialize_war_changes(world)
     _materialize_legitimacy_changes(world)
+    _convert_memories(world)
 
 
 def _importance_for(event_type: str, outcome: ActionOutcome) -> float:
@@ -106,12 +109,19 @@ def _derive_memories(world: WorldState, event: Event) -> None:
 
 
 def _derive_packets(world: WorldState, event: Event) -> None:
+    belief_subject = None
+    if event.event_type in {"POLITY_FOUNDED", "LEGITIMACY_SHIFT"}:
+        belief_subject = "legitimacy_form"
+    elif event.event_type in {"PLAYER_MIRACLE"}:
+        belief_subject = "miracle_credibility"
+    elif event.event_type in {"WAR_DECLARED", "WAR_SKIRMISH"}:
+        belief_subject = "destiny"
     packet_id = emit_info_packet(
         world,
         source_event_id=event.id,
         origin_actor_id=event.participant_ids[0] if event.participant_ids else None,
-        content_domain="belief" if event.event_type == "POLITY_FOUNDED" else "event",
-        subject_ref=event.participant_ids[0] if event.participant_ids else None,
+        content_domain="belief" if belief_subject else "event",
+        subject_ref=belief_subject or (event.participant_ids[0] if event.participant_ids else None),
         location_ref=event.location_tile_id,
         strength=min(100.0, event.importance * 0.8),
         visibility_scope=event.visibility_scope,
@@ -165,6 +175,61 @@ def _materialize_command_execution(world: WorldState) -> None:
         event_layers[HistoricalLayer.LOCAL_CHRONICLE.value].append(event_id)
         _derive_packets(world, event)
         entry["materialized"] = True
+
+
+def _convert_memories(world: WorldState) -> None:
+    memory_conversion_log: list[dict[str, object]] = world.history_index["memory_conversion_log"]  # type: ignore[assignment]
+    belief_log: list[dict[str, object]] = world.history_index["belief_log"]  # type: ignore[assignment]
+    threshold = world.config.balance_parameters.memory_conversion_threshold
+    for memory in world.memories.values():
+        memory.current_effect_weight = max(0.0, memory.current_effect_weight - memory.decay_rate)
+        if not memory.is_conversion_ready or memory.current_effect_weight < threshold:
+            continue
+        source_event = world.events.get(memory.source_event_id)
+        npc = world.npcs.get(memory.npc_id)
+        if source_event is None or npc is None or not npc.alive:
+            continue
+        if source_event.event_type in {"POLITY_FOUNDED", "LEGITIMACY_SHIFT"}:
+            belief_domain = "legitimacy_form"
+        elif source_event.event_type in {"PLAYER_MIRACLE"}:
+            belief_domain = "miracle_credibility"
+        elif source_event.event_type in {"WAR_DECLARED", "WAR_SKIRMISH"}:
+            belief_domain = "destiny"
+        else:
+            belief_domain = None
+        if belief_domain:
+            emit_info_packet(
+                world,
+                source_event_id=source_event.id,
+                origin_actor_id=npc.id,
+                content_domain="belief",
+                subject_ref=belief_domain,
+                location_ref=source_event.location_tile_id,
+                strength=min(100.0, memory.current_effect_weight * 6.0),
+                visibility_scope="local",
+                ttl=world.config.balance_parameters.rumor_base_ttl,
+                truth_alignment=1.0,
+                propagation_channels=["relationship", "organizational"],
+            )
+            belief_log.append(
+                {
+                    "step": world.current_step,
+                    "npc_id": npc.id,
+                    "belief_domain": belief_domain,
+                    "source_event_id": source_event.id,
+                    "strength": round(memory.current_effect_weight * 6.0, 2),
+                }
+            )
+        memory_conversion_log.append(
+            {
+                "step": world.current_step,
+                "memory_id": memory.id,
+                "npc_id": npc.id,
+                "source_event_id": source_event.id,
+                "belief_domain": belief_domain,
+            }
+        )
+        memory.is_conversion_ready = False
 
 
 def _materialize_demographics(world: WorldState) -> None:

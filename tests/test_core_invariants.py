@@ -18,10 +18,10 @@ from coma_engine.core.transfers import (
     validate_reference_consistency,
 )
 from coma_engine.explain import debug_grade_action_explanations, player_grade_npc_summary
-from coma_engine.models.entities import Faction, Settlement
+from coma_engine.models.entities import Event, Faction, MemoryEntry, Settlement
 from coma_engine.player.interventions import queue_information_intervention, queue_npc_modifier_intervention
 from coma_engine.simulation.engine import SimulationEngine
-from coma_engine.simulation.phases import _declare_war, _found_polity, run_political_phase, run_resolution_phase, run_resource_phase
+from coma_engine.simulation.phases import _declare_war, _found_polity, run_event_phase, run_political_phase, run_resolution_phase, run_resource_phase
 from coma_engine.systems.generation import create_world
 from coma_engine.systems.propagation import emit_command_packet
 
@@ -259,6 +259,113 @@ class CoreInvariantTests(unittest.TestCase):
         npc_id = next(iter(world.npcs))
         lines = player_grade_npc_summary(world, npc_id)
         self.assertTrue(all("{" not in line for line in lines))
+
+    def test_trade_success_applies_relation_template(self) -> None:
+        world = create_world(default_config(seed=53))
+        source_settlement = next(iter(world.settlements.values()))
+        actor_id = source_settlement.resident_npc_ids[0]
+        target_tile_id = next(
+            tile_id
+            for tile_id in world.tiles[source_settlement.core_tile_id].adjacent_tile_ids
+            if world.tiles[tile_id].terrain_type != "water" and world.tiles[tile_id].settlement_id is None
+        )
+        target_settlement_id = world.next_id("settlement")
+        target_resident_id = next(
+            npc.id for npc in world.npcs.values() if npc.id not in source_settlement.resident_npc_ids
+        )
+        world.settlements[target_settlement_id] = Settlement(
+            id=target_settlement_id,
+            name="Trade Camp",
+            core_tile_id=target_tile_id,
+            member_tile_ids=[target_tile_id],
+            resident_npc_ids=[],
+            stored_resources={"food": 8.0, "wood": 2.0, "ore": 0.0, "wealth": 1.0},
+            security_level=40.0,
+            stability=52.0,
+            faction_id=None,
+            polity_id=None,
+            active_modifier_ids=[],
+            labor_pool=1.0,
+        )
+        assign_settlement_tiles(world, target_settlement_id, [target_tile_id])
+        move_npc_to_tile(world, target_resident_id, target_tile_id)
+        assign_npc_settlement(world, target_resident_id, target_settlement_id)
+        initial_trust = world.npcs[actor_id].relationships.get(target_resident_id)
+        initial_value = initial_trust.trust if initial_trust else 0.0
+        world.action_queue.append(
+            Action(
+                id=world.next_id("action"),
+                action_type="TRADE",
+                actor_id=actor_id,
+                target_npc_id=None,
+                target_tile_id=None,
+                target_settlement_id=target_settlement_id,
+                target_faction_id=None,
+                target_polity_id=None,
+                declared_step=world.current_step,
+                priority_class="civic",
+                duration_type="travel",
+                estimated_duration=1,
+                resource_cost={"food": 0.4, "wood": 0.0, "ore": 0.0, "wealth": 0.2},
+                risk_value=0.0,
+                availability_rule_id="trade",
+                resolution_group_key=f"TRADE:{target_settlement_id}",
+                status="declared",
+            )
+        )
+        run_resolution_phase(world.clone_for_phase(), world)
+        self.assertGreater(world.npcs[actor_id].relationships[target_resident_id].trust, initial_value)
+
+    def test_memory_conversion_emits_belief_packet(self) -> None:
+        world = create_world(default_config(seed=59))
+        npc_id = next(iter(world.npcs))
+        event_id = world.next_id("event")
+        world.events[event_id] = Event(
+            id=event_id,
+            event_type="PLAYER_MIRACLE",
+            timestamp_step=world.current_step,
+            location_tile_id=world.npcs[npc_id].location_tile_id,
+            region_ref=None,
+            participant_ids=[npc_id],
+            cause_refs=["test"],
+            outcome_summary_code="miracle",
+            importance=80.0,
+            visibility_scope="local",
+            derived_memory_ids=[],
+            derived_modifier_ids=[],
+            derived_info_packet_ids=[],
+        )
+        memory_id = world.next_id("memory")
+        world.memories[memory_id] = MemoryEntry(
+            id=memory_id,
+            npc_id=npc_id,
+            source_event_id=event_id,
+            impression_strength=80.0,
+            emotion_tag="salient",
+            decay_rate=0.1,
+            bias_conversion_rule="default",
+            created_step=world.current_step,
+            current_effect_weight=10.0,
+            is_conversion_ready=True,
+        )
+        run_event_phase(world.clone_for_phase(), world)
+        self.assertTrue(any(packet.content_domain == "belief" for packet in world.info_packets))
+        self.assertTrue(world.history_index["memory_conversion_log"])
+
+    def test_suppress_unrest_executes_counteraction_with_relation_cost(self) -> None:
+        world = create_world(default_config(seed=61))
+        leader = max(world.npcs.values(), key=lambda npc: npc.office_rank)
+        _found_polity(world, leader.id, leader.settlement_id)
+        settlement = world.settlements[leader.settlement_id]
+        resident_id = next(npc_id for npc_id in settlement.resident_npc_ids if npc_id != leader.id)
+        settlement.security_level = 20.0
+        packet_id = emit_command_packet(world, leader.id, settlement.id, "suppress_unrest")
+        world.history_index["packet_deliveries"][packet_id] = [resident_id]
+        run_political_phase(world.clone_for_phase(), world)
+        relation = world.npcs[resident_id].relationships[leader.id]
+        self.assertGreaterEqual(settlement.security_level, 30.0)
+        self.assertGreater(relation.fear, 0.0)
+        self.assertGreater(relation.grievance, 0.0)
 
 
 if __name__ == "__main__":

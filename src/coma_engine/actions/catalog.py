@@ -104,4 +104,14 @@ ACTION_TEMPLATES: dict[str, ActionTemplate] = {
         visibility_strength=22.0,
         command_subject="muster_force",
     ),
+    "SUPPRESS_UNREST": ActionTemplate(
+        action_type="SUPPRESS_UNREST",
+        signature=TargetSignature(required_targets=("target_settlement_id",)),
+        default_priority_class="civic",
+        default_duration_type="channeling",
+        default_duration=2,
+        availability_rule_id="suppress_unrest",
+        visibility_strength=24.0,
+        command_subject="suppress_unrest",
+    ),
 }

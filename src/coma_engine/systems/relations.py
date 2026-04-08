@@ -4,28 +4,58 @@ from coma_engine.core.state import WorldState
 from coma_engine.models.entities import NPC, RelationEntry
 
 
-def apply_relation_template(entry: RelationEntry, template_name: str) -> RelationEntry:
-    if template_name == "aid":
-        entry.debt += 12.0
-        entry.trust += 10.0
-        entry.affinity += 4.0
-    elif template_name == "betrayal":
-        entry.trust -= 20.0
-        entry.grievance += 18.0
-        entry.fear += 8.0
-    elif template_name == "shared_work":
-        entry.familiarity += 5.0
-        entry.trust += 2.0
-    elif template_name == "repression":
-        entry.fear += 16.0
-        entry.grievance += 14.0
-    elif template_name == "good_governance":
-        entry.trust += 6.0
-        entry.affinity += 4.0
-    elif template_name == "extractive_taxation":
-        entry.grievance += 10.0
-        entry.affinity -= 5.0
+def ensure_relation_entry(world: WorldState, npc_id: str, other_id: str) -> RelationEntry:
+    npc = world.npcs[npc_id]
+    if other_id not in npc.relationships:
+        npc.relationships[other_id] = RelationEntry()
+    return npc.relationships[other_id]
+
+
+def apply_relation_template(entry: RelationEntry, template_values: dict[str, float], scale: float = 1.0) -> RelationEntry:
+    for axis, delta in template_values.items():
+        setattr(entry, axis, max(0.0, min(100.0, getattr(entry, axis) + delta * scale)))
     return entry
+
+
+def apply_relation_template_between(
+    world: WorldState,
+    source_id: str,
+    target_id: str,
+    template_name: str,
+    *,
+    scale: float = 1.0,
+    reciprocal: str | None = None,
+) -> None:
+    templates = world.config.balance_parameters.relation_templates
+    template_values = templates.get(template_name)
+    if template_values is None or source_id not in world.npcs or target_id not in world.npcs:
+        return
+    source_entry = ensure_relation_entry(world, source_id, target_id)
+    apply_relation_template(source_entry, template_values, scale)
+    relation_log: list[dict[str, object]] = world.history_index["relation_log"]  # type: ignore[assignment]
+    relation_log.append(
+        {
+            "step": world.current_step,
+            "source_id": source_id,
+            "target_id": target_id,
+            "template": template_name,
+            "scale": round(scale, 2),
+        }
+    )
+    if reciprocal:
+        reciprocal_values = templates.get(reciprocal)
+        if reciprocal_values is not None:
+            reciprocal_entry = ensure_relation_entry(world, target_id, source_id)
+            apply_relation_template(reciprocal_entry, reciprocal_values, scale)
+            relation_log.append(
+                {
+                    "step": world.current_step,
+                    "source_id": target_id,
+                    "target_id": source_id,
+                    "template": reciprocal,
+                    "scale": round(scale, 2),
+                }
+            )
 
 
 def compute_group_salience(world: WorldState, npc: NPC) -> dict[str, float]:

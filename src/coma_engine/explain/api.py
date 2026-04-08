@@ -59,6 +59,27 @@ def debug_grade_step_report(world: WorldState, step: int) -> list[str]:
             "demography:"
             f"{entry.get('kind')}:{entry.get('npc_id')}:at={entry.get('location_ref')}"
         )
+    relation_log: list[dict[str, object]] = world.history_index["relation_log"]  # type: ignore[assignment]
+    for entry in relation_log[-5:]:
+        lines.append(
+            "relation:"
+            f"{entry.get('source_id')}->{entry.get('target_id')}:"
+            f"{entry.get('template')}:x{entry.get('scale')}"
+        )
+    belief_log: list[dict[str, object]] = world.history_index["belief_log"]  # type: ignore[assignment]
+    for entry in belief_log[-5:]:
+        lines.append(
+            "belief:"
+            f"{entry.get('npc_id')}:{entry.get('belief_domain')}:"
+            f"{entry.get('source_event_id')}:strength={entry.get('strength')}"
+        )
+    memory_log: list[dict[str, object]] = world.history_index["memory_conversion_log"]  # type: ignore[assignment]
+    for entry in memory_log[-5:]:
+        lines.append(
+            "memory_convert:"
+            f"{entry.get('memory_id')}:{entry.get('npc_id')}:"
+            f"{entry.get('belief_domain')}"
+        )
     return lines
 
 
