@@ -38,6 +38,8 @@ This repository implements the first-pass formal systems foundation described in
 - Formal command packets with delivery, delay, distortion, resistance, and execution records
 - Persistent archives for dissolved settlements, factions, and polities so history references remain valid
 - First-pass continuous-action semantics for partial progress, interruption, and outcome recording
+- First-pass demographic loop with aging, birth/death records, and labor/combat population separation
+- First-pass war loop with attrition, strain, loot transfer, and peace-tension feedback
 - Formal player intervention queue restricted to approved channels
 - Core invariant tests for replayability, reference consistency, political gating, phase snapshots, action interruption, and command-chain delay
 
@@ -66,6 +68,8 @@ Interactive shell commands:
 - `map`: print a compact terrain and settlement map
 - `npc <npc_id>`: inspect one NPC summary
 - `settlement <settlement_id>`: inspect one settlement summary
+- `polity <polity_id>`: inspect one polity summary
+- `war <war_id>`: inspect one war summary
 - `bless <npc_id>`: queue a player modifier intervention
 - `resource <tile_or_settlement_id>`: queue a player resource modifier intervention
 - `rumor <tile_id>`: queue an information intervention

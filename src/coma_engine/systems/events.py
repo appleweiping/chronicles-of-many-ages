@@ -59,6 +59,9 @@ def materialize_outcomes(world: WorldState) -> None:
         _derive_memories(world, event)
         _derive_packets(world, event)
     _materialize_command_execution(world)
+    _materialize_demographics(world)
+    _materialize_war_changes(world)
+    _materialize_legitimacy_changes(world)
 
 
 def _importance_for(event_type: str, outcome: ActionOutcome) -> float:
@@ -152,6 +155,99 @@ def _materialize_command_execution(world: WorldState) -> None:
             cause_refs=[str(entry["packet_id"]), str(entry["command_subject"])],
             outcome_summary_code=outcome,
             importance=importance,
+            visibility_scope="local",
+            derived_memory_ids=[],
+            derived_modifier_ids=[],
+            derived_info_packet_ids=[],
+        )
+        world.events[event_id] = event
+        events_by_step.setdefault(world.current_step, []).append(event_id)
+        event_layers[HistoricalLayer.LOCAL_CHRONICLE.value].append(event_id)
+        _derive_packets(world, event)
+        entry["materialized"] = True
+
+
+def _materialize_demographics(world: WorldState) -> None:
+    demographic_log: list[dict[str, object]] = world.history_index["demographic_log"]  # type: ignore[assignment]
+    events_by_step: dict[int, list[str]] = world.history_index["events_by_step"]  # type: ignore[assignment]
+    event_layers: dict[str, list[str]] = world.history_index["event_layers"]  # type: ignore[assignment]
+    for entry in demographic_log:
+        if entry.get("step") != world.current_step or entry.get("materialized"):
+            continue
+        kind = str(entry["kind"])
+        event_id = world.next_id("event")
+        event = Event(
+            id=event_id,
+            event_type="NPC_BORN" if kind == "birth" else "NPC_DIED",
+            timestamp_step=world.current_step,
+            location_tile_id=str(entry["location_ref"]),
+            region_ref=None,
+            participant_ids=[str(entry["npc_id"])],
+            cause_refs=[kind, str(entry["family_id"])],
+            outcome_summary_code=kind,
+            importance=45.0 if kind == "birth" else 52.0,
+            visibility_scope="local",
+            derived_memory_ids=[],
+            derived_modifier_ids=[],
+            derived_info_packet_ids=[],
+        )
+        world.events[event_id] = event
+        events_by_step.setdefault(world.current_step, []).append(event_id)
+        event_layers[HistoricalLayer.LOCAL_CHRONICLE.value].append(event_id)
+        _derive_packets(world, event)
+        entry["materialized"] = True
+
+
+def _materialize_war_changes(world: WorldState) -> None:
+    war_log: list[dict[str, object]] = world.history_index["war_log"]  # type: ignore[assignment]
+    events_by_step: dict[int, list[str]] = world.history_index["events_by_step"]  # type: ignore[assignment]
+    event_layers: dict[str, list[str]] = world.history_index["event_layers"]  # type: ignore[assignment]
+    for entry in war_log:
+        if entry.get("step") != world.current_step or entry.get("materialized"):
+            continue
+        event_id = world.next_id("event")
+        loser = world.polities.get(str(entry["loser_polity_id"]))
+        event = Event(
+            id=event_id,
+            event_type="WAR_SKIRMISH",
+            timestamp_step=world.current_step,
+            location_tile_id=world.settlements[loser.capital_settlement_id].core_tile_id if loser else None,
+            region_ref=None,
+            participant_ids=[str(entry["winner_polity_id"]), str(entry["loser_polity_id"])],
+            cause_refs=[str(entry["war_id"])],
+            outcome_summary_code=f"loot={entry['loot']}",
+            importance=min(90.0, 55.0 + float(entry["front_pressure"]) * 0.4),
+            visibility_scope="broad",
+            derived_memory_ids=[],
+            derived_modifier_ids=[],
+            derived_info_packet_ids=[],
+        )
+        world.events[event_id] = event
+        events_by_step.setdefault(world.current_step, []).append(event_id)
+        event_layers[HistoricalLayer.CIVILIZATION_NODE.value].append(event_id)
+        _derive_packets(world, event)
+        entry["materialized"] = True
+
+
+def _materialize_legitimacy_changes(world: WorldState) -> None:
+    legitimacy_log: list[dict[str, object]] = world.history_index["legitimacy_log"]  # type: ignore[assignment]
+    events_by_step: dict[int, list[str]] = world.history_index["events_by_step"]  # type: ignore[assignment]
+    event_layers: dict[str, list[str]] = world.history_index["event_layers"]  # type: ignore[assignment]
+    for entry in legitimacy_log:
+        if entry.get("step") != world.current_step or entry.get("materialized"):
+            continue
+        polity = world.polities.get(str(entry["polity_id"])) or world.archived_polities.get(str(entry["polity_id"]))
+        event_id = world.next_id("event")
+        event = Event(
+            id=event_id,
+            event_type="LEGITIMACY_SHIFT",
+            timestamp_step=world.current_step,
+            location_tile_id=world.settlements[polity.capital_settlement_id].core_tile_id if polity and polity.capital_settlement_id in world.settlements else None,
+            region_ref=None,
+            participant_ids=[str(entry["polity_id"])],
+            cause_refs=[str(entry["kind"])],
+            outcome_summary_code=f"{entry['kind']}:{entry['delta']}",
+            importance=42.0,
             visibility_scope="local",
             derived_memory_ids=[],
             derived_modifier_ids=[],

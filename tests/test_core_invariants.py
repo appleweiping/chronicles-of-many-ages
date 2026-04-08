@@ -8,11 +8,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from coma_engine.config.schema import default_config
 from coma_engine.actions.models import Action
-from coma_engine.core.transfers import move_npc_to_tile, reconcile_references, validate_reference_consistency
-from coma_engine.explain import debug_grade_action_explanations
+from coma_engine.core.transfers import (
+    assign_npc_faction,
+    assign_npc_settlement,
+    assign_settlement_faction,
+    assign_settlement_tiles,
+    move_npc_to_tile,
+    reconcile_references,
+    validate_reference_consistency,
+)
+from coma_engine.explain import debug_grade_action_explanations, player_grade_npc_summary
+from coma_engine.models.entities import Faction, Settlement
 from coma_engine.player.interventions import queue_information_intervention, queue_npc_modifier_intervention
 from coma_engine.simulation.engine import SimulationEngine
-from coma_engine.simulation.phases import _found_polity, run_political_phase, run_resolution_phase
+from coma_engine.simulation.phases import _declare_war, _found_polity, run_political_phase, run_resolution_phase, run_resource_phase
 from coma_engine.systems.generation import create_world
 from coma_engine.systems.propagation import emit_command_packet
 
@@ -164,6 +173,92 @@ class CoreInvariantTests(unittest.TestCase):
         self.assertTrue(
             any(entry["outcome"] == "delayed_no_executor" for entry in world.history_index["command_execution_log"])
         )
+
+    def test_children_do_not_count_as_full_labor_pool(self) -> None:
+        world = create_world(default_config(seed=41))
+        settlement = next(iter(world.settlements.values()))
+        resident_ids = list(settlement.resident_npc_ids)
+        if len(resident_ids) < 3:
+            needed = 3 - len(resident_ids)
+            reinforcements = [npc.id for npc in world.npcs.values() if npc.id not in resident_ids][:needed]
+            for npc_id in reinforcements:
+                move_npc_to_tile(world, npc_id, settlement.core_tile_id)
+                assign_npc_settlement(world, npc_id, settlement.id)
+            resident_ids = list(settlement.resident_npc_ids)[:3]
+        world.npcs[resident_ids[0]].age = 10.0
+        world.npcs[resident_ids[1]].age = 25.0
+        world.npcs[resident_ids[2]].age = 68.0
+        run_resource_phase(world.clone_for_phase(), world)
+        self.assertEqual(settlement.labor_pool, 1.0)
+
+    def test_war_strain_reduces_civil_legitimacy_and_consumes_treasury(self) -> None:
+        world = create_world(default_config(seed=43))
+        leader = max(world.npcs.values(), key=lambda npc: npc.office_rank)
+        _found_polity(world, leader.id, leader.settlement_id)
+        first_polity_id = next(iter(world.polities))
+        source_residents = [
+            npc.id
+            for npc in world.npcs.values()
+            if npc.settlement_id != leader.settlement_id and npc.id != leader.id
+        ][:3]
+        target_tile = next(
+            tile.id
+            for tile in world.tiles.values()
+            if tile.terrain_type == "plains" and tile.settlement_id is None
+        )
+        second_settlement_id = world.next_id("settlement")
+        world.settlements[second_settlement_id] = Settlement(
+            id=second_settlement_id,
+            name="Rival Camp",
+            core_tile_id=target_tile,
+            member_tile_ids=[target_tile],
+            resident_npc_ids=[],
+            stored_resources={"food": 12.0, "wood": 5.0, "ore": 1.0, "wealth": 4.0},
+            security_level=48.0,
+            stability=56.0,
+            faction_id=None,
+            polity_id=None,
+            active_modifier_ids=[],
+            labor_pool=3.0,
+        )
+        assign_settlement_tiles(world, second_settlement_id, [target_tile])
+        for npc_id in source_residents:
+            move_npc_to_tile(world, npc_id, target_tile)
+            assign_npc_settlement(world, npc_id, second_settlement_id)
+        rival_faction_id = world.next_id("faction")
+        world.factions[rival_faction_id] = Faction(
+            id=rival_faction_id,
+            name="Rival Circle",
+            leader_npc_id=source_residents[0],
+            member_npc_ids=[],
+            settlement_ids=[],
+            support_score=72.0,
+            cohesion=70.0,
+            agenda_type="survival",
+            legitimacy_seed_components={"support": 72.0},
+            active_modifier_ids=[],
+        )
+        for npc_id in source_residents:
+            assign_npc_faction(world, npc_id, rival_faction_id)
+        assign_settlement_faction(world, second_settlement_id, rival_faction_id)
+        rival_leader = world.npcs[source_residents[0]]
+        rival_leader.office_rank = 4
+        _found_polity(world, rival_leader.id, second_settlement_id)
+        polity_ids = list(world.polities)
+        self.assertEqual(len(polity_ids), 2)
+        _declare_war(world, polity_ids[0], polity_ids[1])
+        before = {polity_id: world.polities[polity_id].treasury["food"] for polity_id in polity_ids}
+        run_political_phase(world.clone_for_phase(), world)
+        for polity_id in polity_ids:
+            polity = world.polities[polity_id]
+            self.assertGreater(polity.legitimacy_components.get("war_strain", 0.0), 0.0)
+            self.assertLessEqual(polity.treasury["food"], before[polity_id])
+
+    def test_player_grade_npc_summary_hides_raw_needs_dict(self) -> None:
+        world = create_world(default_config(seed=47))
+        npc_id = next(iter(world.npcs))
+        lines = player_grade_npc_summary(world, npc_id)
+        self.assertTrue(all("{" not in line for line in lines))
 
 
 if __name__ == "__main__":

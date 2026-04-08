@@ -57,6 +57,9 @@ class WorldState:
             "command_log": [],
             "command_packet_subjects": {},
             "command_execution_log": [],
+            "demographic_log": [],
+            "war_log": [],
+            "legitimacy_log": [],
             "packet_deliveries": {},
             "executed_command_packets": set(),
         }

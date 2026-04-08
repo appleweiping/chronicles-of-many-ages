@@ -16,9 +16,10 @@ from coma_engine.core.transfers import (
     reconcile_references,
     validate_reference_consistency,
 )
-from coma_engine.models.entities import Faction, Polity, Settlement, WarState
+from coma_engine.models.entities import Faction, Goal, NPC, Polity, RelationEntry, Settlement, WarState
 from coma_engine.models.perception import (
     OpportunityPerception,
+    PerceivedState,
     PowerMapPerception,
     RecentEventPerception,
     ResourceSignalPerception,
@@ -31,6 +32,38 @@ from coma_engine.systems.relations import compute_group_salience
 from coma_engine.systems.spatial import shortest_path_cost, traversable_neighbors
 
 
+def _is_labor_eligible(world: WorldState, npc) -> bool:
+    params = world.config.balance_parameters
+    return npc.alive and params.labor_age_min <= npc.age <= params.labor_age_max
+
+
+def _is_combat_eligible(world: WorldState, npc) -> bool:
+    params = world.config.balance_parameters
+    return npc.alive and params.combat_age_min <= npc.age <= params.combat_age_max
+
+
+def _settlement_population_profile(world: WorldState, settlement_id: str) -> dict[str, float]:
+    settlement = world.settlements[settlement_id]
+    residents = [world.npcs[npc_id] for npc_id in settlement.resident_npc_ids if npc_id in world.npcs and world.npcs[npc_id].alive]
+    return {
+        "total": float(len(residents)),
+        "labor": float(sum(1 for npc in residents if _is_labor_eligible(world, npc))),
+        "combat": float(sum(1 for npc in residents if _is_combat_eligible(world, npc))),
+    }
+
+
+def _polity_population_profile(world: WorldState, polity_id: str) -> dict[str, float]:
+    totals = {"total": 0.0, "labor": 0.0, "combat": 0.0}
+    polity = world.polities[polity_id]
+    for settlement_id in polity.member_settlement_ids:
+        if settlement_id not in world.settlements:
+            continue
+        profile = _settlement_population_profile(world, settlement_id)
+        for key in totals:
+            totals[key] += profile[key]
+    return totals
+
+
 def run_environment_phase(snapshot: WorldState, working: WorldState) -> None:
     _activate_delayed_effects(working)
     for tile in working.tiles.values():
@@ -40,13 +73,114 @@ def run_environment_phase(snapshot: WorldState, working: WorldState) -> None:
     tick_modifier_lifecycles(working)
     for packet in working.info_packets:
         packet.propagated_this_step = False
+    _advance_demographics(working)
+
+
+def _advance_demographics(world: WorldState) -> None:
+    params = world.config.balance_parameters
+    demographic_log: list[dict[str, object]] = world.history_index["demographic_log"]  # type: ignore[assignment]
+    active_war_polities = {
+        polity_id
+        for war in world.war_states.values()
+        if war.status == "active"
+        for polity_id in war.participant_polity_ids
+    }
+
+    for npc in world.npcs.values():
+        if not npc.alive:
+            continue
+        npc.age += params.age_increment_per_step
+        tile = world.tiles[npc.location_tile_id]
+        mortality = params.base_mortality_probability
+        if npc.age > params.old_age_start:
+            mortality += (npc.age - params.old_age_start) * params.old_age_mortality_scale
+        mortality += max(0.0, (30.0 - npc.health) / 1000.0)
+        mortality += tile.danger / 5000.0
+        if npc.polity_id in active_war_polities and _is_combat_eligible(world, npc):
+            mortality += params.war_attrition_scale * 0.2
+        if world.rng.random() < mortality:
+            npc.alive = False
+            npc.current_action_ref = None
+            demographic_log.append(
+                {
+                    "step": world.current_step,
+                    "kind": "death",
+                    "npc_id": npc.id,
+                    "location_ref": npc.location_tile_id,
+                    "family_id": npc.family_id,
+                    "culture_id": npc.culture_id,
+                }
+            )
+
+    for settlement in list(world.settlements.values()):
+        profile = _settlement_population_profile(world, settlement.id)
+        if profile["labor"] < 2.0 or settlement.stored_resources.get("food", 0.0) < params.birth_food_threshold:
+            continue
+        if world.rng.random() > params.settlement_birth_probability:
+            continue
+        parents = [
+            world.npcs[npc_id]
+            for npc_id in settlement.resident_npc_ids
+            if npc_id in world.npcs and _is_labor_eligible(world, world.npcs[npc_id])
+        ]
+        if not parents:
+            continue
+        parent = world.rng.choice(parents)
+        npc_id = world.next_id("npc")
+        newborn = NPC(
+            id=npc_id,
+            name=f"NPC {npc_id.split(':')[-1]}",
+            alive=True,
+            age=0.0,
+            culture_id=parent.culture_id,
+            family_id=parent.family_id,
+            location_tile_id=settlement.core_tile_id,
+            health=88.0,
+            settlement_id=None,
+            faction_id=None,
+            polity_id=None,
+            role="child",
+            office_rank=0,
+            personal_inventory={"food": 0.0, "wood": 0.0, "ore": 0.0, "wealth": 0.0},
+            needs={"food": 25.0, "safety": 20.0, "social": 20.0, "status": 5.0, "meaning": 5.0},
+            personality=dict(parent.personality),
+            abilities={"foraging": 10.0, "mobility": 12.0, "politics": 0.0, "warfare": 0.0},
+            beliefs=dict(parent.beliefs),
+            relationships={parent.id: RelationEntry(affinity=30.0, trust=20.0, familiarity=30.0)},
+            memory_ids=[],
+            long_term_goal=Goal(goal_type="SURVIVE"),
+            active_modifier_ids=[],
+            cooldowns={},
+            current_action_ref=None,
+            perceived_state=PerceivedState(),
+        )
+        world.npcs[npc_id] = newborn
+        if npc_id not in world.tiles[settlement.core_tile_id].resident_npc_ids:
+            world.tiles[settlement.core_tile_id].resident_npc_ids.append(npc_id)
+        assign_npc_settlement(world, npc_id, settlement.id)
+        if settlement.faction_id:
+            assign_npc_faction(world, npc_id, settlement.faction_id)
+        if settlement.polity_id:
+            assign_npc_polity(world, npc_id, settlement.polity_id)
+        settlement.stored_resources["food"] = max(0.0, settlement.stored_resources.get("food", 0.0) - 1.0)
+        demographic_log.append(
+            {
+                "step": world.current_step,
+                "kind": "birth",
+                "npc_id": npc_id,
+                "location_ref": settlement.core_tile_id,
+                "family_id": parent.family_id,
+                "culture_id": parent.culture_id,
+            }
+        )
 
 
 def run_resource_phase(snapshot: WorldState, working: WorldState) -> None:
     for settlement in working.settlements.values():
         settlement.net_production = {resource: 0.0 for resource in working.config.design_constants.resource_types}
         settlement.current_taxable_output = 0.0
-        settlement.labor_pool = float(len(settlement.resident_npc_ids))
+        profile = _settlement_population_profile(working, settlement.id)
+        settlement.labor_pool = profile["labor"]
     for npc in working.npcs.values():
         if not npc.alive:
             continue
@@ -54,14 +188,15 @@ def run_resource_phase(snapshot: WorldState, working: WorldState) -> None:
         tile_modifiers = active_modifiers_for(working, tile.id, "yield.food")
         allowed, yield_value, _ = apply_modifier_pipeline(tile.base_yield.get("food", 0.0), tile_modifiers)
         tile.effective_yield["food"] = yield_value if allowed else 0.0
+        labor_factor = 1.0 if _is_labor_eligible(working, npc) else 0.0
         if npc.settlement_id and npc.settlement_id in working.settlements:
             settlement = working.settlements[npc.settlement_id]
-            produced = min(tile.current_stock.get("food", 0.0), tile.effective_yield["food"] * 0.5)
+            produced = min(tile.current_stock.get("food", 0.0), tile.effective_yield["food"] * 0.5 * labor_factor)
             tile.current_stock["food"] -= produced
             settlement.stored_resources["food"] = settlement.stored_resources.get("food", 0.0) + produced
             settlement.net_production["food"] += produced
         else:
-            produced = min(tile.current_stock.get("food", 0.0), tile.effective_yield["food"] * 0.3)
+            produced = min(tile.current_stock.get("food", 0.0), tile.effective_yield["food"] * 0.3 * labor_factor)
             tile.current_stock["food"] -= produced
             npc.personal_inventory["food"] = npc.personal_inventory.get("food", 0.0) + produced
 
@@ -1014,11 +1149,11 @@ def _execute_command_chain(world: WorldState) -> None:
                     settlement.stored_resources[resource] = settlement.stored_resources.get(resource, 0.0) - extracted
                     polity.treasury[resource] = polity.treasury.get(resource, 0.0) + extracted
             elif command_subject == "muster_force":
-                labor_draw = max(0.0, min(settlement.labor_pool * 0.15, 2.0))
-                settlement.labor_pool = max(0.0, settlement.labor_pool - labor_draw)
-                settlement.stored_resources["food"] = max(0.0, settlement.stored_resources.get("food", 0.0) - labor_draw * 0.8)
-                polity.military_strength_base = world.clamp_metric(polity.military_strength_base + labor_draw * 4.0)
-                polity.war_readiness = world.clamp_metric(polity.war_readiness + labor_draw * 8.0)
+                profile = _settlement_population_profile(world, settlement.id)
+                combat_draw = max(0.0, min(profile["combat"] * 0.15, 2.0))
+                settlement.stored_resources["food"] = max(0.0, settlement.stored_resources.get("food", 0.0) - combat_draw * 0.8)
+                polity.military_strength_base = world.clamp_metric(polity.military_strength_base + combat_draw * 4.0)
+                polity.war_readiness = world.clamp_metric(polity.war_readiness + combat_draw * 8.0)
             polity.command_network_state["latency"] = max(0.0, polity.command_network_state.get("latency", 0.0) - 2.0)
             outcome = "executed"
             executed_packets.add(packet.id)
@@ -1044,12 +1179,20 @@ def _execute_command_chain(world: WorldState) -> None:
 
 
 def _update_taxation(world: WorldState) -> None:
+    active_war_fatigue: dict[str, float] = {}
+    for war in world.war_states.values():
+        if war.status != "active":
+            continue
+        for polity_id, fatigue in war.war_fatigue_levels.items():
+            active_war_fatigue[polity_id] = max(active_war_fatigue.get(polity_id, 0.0), fatigue)
     for settlement in world.settlements.values():
         settlement.current_taxable_output = 0.0
+        profile = _settlement_population_profile(world, settlement.id)
+        labor_ratio = profile["labor"] / max(1.0, profile["total"])
         produced = (
-            settlement.stored_resources.get("food", 0.0) * 0.2
-            + settlement.stored_resources.get("wood", 0.0) * 0.15
-            + settlement.stored_resources.get("ore", 0.0) * 0.25
+            settlement.stored_resources.get("food", 0.0) * 0.2 * labor_ratio
+            + settlement.stored_resources.get("wood", 0.0) * 0.15 * labor_ratio
+            + settlement.stored_resources.get("ore", 0.0) * 0.25 * labor_ratio
             + settlement.stored_resources.get("wealth", 0.0)
         )
         settlement.current_taxable_output = produced
@@ -1060,26 +1203,91 @@ def _update_taxation(world: WorldState) -> None:
                 world.settlements[polity.capital_settlement_id].core_tile_id,
                 settlement.core_tile_id,
             )
-            polity.administrative_reach = world.clamp_metric(70.0 - distance_cost * 4.0)
+            war_penalty = active_war_fatigue.get(polity.id, 0.0) * 0.15
+            polity.administrative_reach = world.clamp_metric(70.0 - distance_cost * 4.0 - war_penalty)
 
 
 def _update_war_states(world: WorldState) -> None:
+    war_log: list[dict[str, object]] = world.history_index["war_log"]  # type: ignore[assignment]
+    legitimacy_log: list[dict[str, object]] = world.history_index["legitimacy_log"]  # type: ignore[assignment]
+    active_participants: set[str] = set()
     for war in world.war_states.values():
         if war.status != "active":
             continue
+        active_participants.update(war.participant_polity_ids)
         participants = [world.polities[polity_id] for polity_id in war.participant_polity_ids if polity_id in world.polities]
         if len(participants) < 2:
             war.status = "ended"
             continue
-        average_strength = sum(polity.military_strength_base for polity in participants) / len(participants)
-        war.effective_front_pressure = average_strength * 0.1
-        war.expected_attrition = 2.0 + len(participants)
-        war.escalation_risk = min(100.0, war.effective_front_pressure + sum(war.war_fatigue_levels.values()) * 0.2)
-        for polity in participants:
-            war.war_fatigue_levels[polity.id] = min(100.0, war.war_fatigue_levels.get(polity.id, 0.0) + 2.0)
-            polity.stability = world.clamp_metric(polity.stability - 1.5)
-            polity.legitimacy_components["war_strain"] = polity.legitimacy_components.get("war_strain", 0.0) + 2.0
-            polity.treasury["wealth"] = max(0.0, polity.treasury.get("wealth", 0.0) - 0.5)
+        attacker, defender = participants[0], participants[1]
+        attacker_profile = _polity_population_profile(world, attacker.id)
+        defender_profile = _polity_population_profile(world, defender.id)
+        attacker_strength = attacker.military_strength_base + attacker.war_readiness * 0.4 + attacker_profile["combat"] * 2.0
+        defender_strength = defender.military_strength_base + defender.war_readiness * 0.4 + defender_profile["combat"] * 2.0
+        capital_distance = shortest_path_cost(
+            world,
+            world.settlements[attacker.capital_settlement_id].core_tile_id,
+            world.settlements[defender.capital_settlement_id].core_tile_id,
+        )
+        if capital_distance == float("inf"):
+            capital_distance = 12.0
+        average_strength = (attacker_strength + defender_strength) / 2.0
+        war.effective_front_pressure = max(5.0, average_strength * 0.08 - capital_distance)
+        war.expected_attrition = max(1.0, world.config.balance_parameters.war_attrition_scale * average_strength * 0.1)
+        war.escalation_risk = min(100.0, war.effective_front_pressure + sum(war.war_fatigue_levels.values()) * 0.25)
+        winner = attacker if attacker_strength >= defender_strength else defender
+        loser = defender if winner is attacker else attacker
+        loot = min(loser.treasury.get("wealth", 0.0), world.config.balance_parameters.war_loot_rate * max(1.0, war.effective_front_pressure))
+        loser.treasury["wealth"] = max(0.0, loser.treasury.get("wealth", 0.0) - loot)
+        winner.treasury["wealth"] = winner.treasury.get("wealth", 0.0) + loot * 0.6
+        winner.treasury["food"] = winner.treasury.get("food", 0.0) + loot * 0.2
+        for polity, profile in ((attacker, attacker_profile), (defender, defender_profile)):
+            fatigue_gain = 1.5 + war.expected_attrition + max(0.0, 12.0 - capital_distance) * 0.1
+            war.war_fatigue_levels[polity.id] = min(100.0, war.war_fatigue_levels.get(polity.id, 0.0) + fatigue_gain)
+            polity.stability = world.clamp_metric(polity.stability - (1.0 + war.expected_attrition * 0.4))
+            polity.legitimacy_components["war_strain"] = polity.legitimacy_components.get("war_strain", 0.0) + fatigue_gain
+            polity.legitimacy_components["civil_order"] = world.clamp_metric(
+                polity.legitimacy_components.get("civil_order", 50.0) - fatigue_gain * 0.35
+            )
+            polity.treasury["food"] = max(0.0, polity.treasury.get("food", 0.0) - max(0.5, profile["combat"] * 0.1))
+            polity.military_strength_base = world.clamp_metric(polity.military_strength_base - war.expected_attrition * 0.3)
+            polity.frontier_tension = max(0.0, polity.frontier_tension - 1.0)
+            legitimacy_log.append(
+                {
+                    "step": world.current_step,
+                    "polity_id": polity.id,
+                    "kind": "war_strain",
+                    "delta": round(-fatigue_gain * 0.35, 2),
+                }
+            )
+        war_log.append(
+            {
+                "step": world.current_step,
+                "war_id": war.id,
+                "winner_polity_id": winner.id,
+                "loser_polity_id": loser.id,
+                "loot": round(loot, 2),
+                "front_pressure": round(war.effective_front_pressure, 2),
+            }
+        )
+    for polity in world.polities.values():
+        if polity.id in active_participants:
+            continue
+        polity.frontier_tension = world.clamp_metric(polity.frontier_tension + world.config.balance_parameters.peace_tension_gain)
+        polity.legitimacy_components["war_strain"] = max(
+            0.0,
+            polity.legitimacy_components.get("war_strain", 0.0) - world.config.balance_parameters.war_strain_decay,
+        )
+        if polity.frontier_tension >= 40.0:
+            polity.stability = world.clamp_metric(polity.stability - 0.3)
+            legitimacy_log.append(
+                {
+                    "step": world.current_step,
+                    "polity_id": polity.id,
+                    "kind": "peace_tension",
+                    "delta": -0.3,
+                }
+            )
 
 
 def _update_settlement_hysteresis(world: WorldState) -> None:

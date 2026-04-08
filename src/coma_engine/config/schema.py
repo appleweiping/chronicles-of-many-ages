@@ -98,6 +98,20 @@ class BalanceParameters:
     debug_candidate_action_count: int = 5
     action_noise_amplitude: float = 3.0
     low_rank_high_politics_gate_rank: int = 3
+    labor_age_min: int = 16
+    labor_age_max: int = 60
+    combat_age_min: int = 16
+    combat_age_max: int = 45
+    age_increment_per_step: float = 1.0
+    base_mortality_probability: float = 0.002
+    old_age_start: float = 65.0
+    old_age_mortality_scale: float = 0.003
+    birth_food_threshold: float = 10.0
+    settlement_birth_probability: float = 0.08
+    war_attrition_scale: float = 0.06
+    peace_tension_gain: float = 0.8
+    war_strain_decay: float = 0.6
+    war_loot_rate: float = 0.08
     path_costs: dict[TerrainType, float] = field(
         default_factory=lambda: {
             "plains": 1.0,
