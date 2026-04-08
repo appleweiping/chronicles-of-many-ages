@@ -137,6 +137,11 @@ class BalanceParameters:
     war_supply_shortfall_support_penalty: float = 12.0
     war_supply_shortfall_stability_penalty: float = 4.0
     war_supply_success_support_gain: float = 3.0
+    war_support_strength_scale: float = 0.25
+    muster_war_support_gain_scale: float = 8.0
+    muster_local_burden_stability_penalty: float = 1.8
+    allocation_war_support_gain_scale: float = 0.4
+    allocation_war_support_diversion_penalty: float = 0.3
     loot_remittance_rate: float = 0.55
     relation_templates: dict[str, dict[str, float]] = field(
         default_factory=lambda: {

@@ -453,6 +453,75 @@ class CoreInvariantTests(unittest.TestCase):
         )
         self.assertNotEqual(before_support, world.war_states[war_id].war_support_levels)
 
+    def test_muster_force_feeds_war_support_and_local_burden(self) -> None:
+        world = create_world(default_config(seed=44))
+        leader = max(world.npcs.values(), key=lambda npc: npc.office_rank)
+        _found_polity(world, leader.id, leader.settlement_id)
+        source_residents = [
+            npc.id
+            for npc in world.npcs.values()
+            if npc.settlement_id != leader.settlement_id and npc.id != leader.id
+        ][:3]
+        target_tile = next(
+            tile.id
+            for tile in world.tiles.values()
+            if tile.terrain_type == "plains" and tile.settlement_id is None
+        )
+        second_settlement_id = world.next_id("settlement")
+        world.settlements[second_settlement_id] = Settlement(
+            id=second_settlement_id,
+            name="Rival Muster Camp",
+            core_tile_id=target_tile,
+            member_tile_ids=[target_tile],
+            resident_npc_ids=[],
+            stored_resources={"food": 12.0, "wood": 5.0, "ore": 1.0, "wealth": 4.0},
+            security_level=48.0,
+            stability=56.0,
+            faction_id=None,
+            polity_id=None,
+            active_modifier_ids=[],
+            labor_pool=3.0,
+        )
+        assign_settlement_tiles(world, second_settlement_id, [target_tile])
+        for npc_id in source_residents:
+            move_npc_to_tile(world, npc_id, target_tile)
+            assign_npc_settlement(world, npc_id, second_settlement_id)
+        rival_faction_id = world.next_id("faction")
+        world.factions[rival_faction_id] = Faction(
+            id=rival_faction_id,
+            name="Rival Muster Ring",
+            leader_npc_id=source_residents[0],
+            member_npc_ids=[],
+            settlement_ids=[],
+            support_score=72.0,
+            cohesion=70.0,
+            agenda_type="survival",
+            legitimacy_seed_components={"support": 72.0},
+            active_modifier_ids=[],
+        )
+        for npc_id in source_residents:
+            assign_npc_faction(world, npc_id, rival_faction_id)
+        assign_settlement_faction(world, second_settlement_id, rival_faction_id)
+        rival_leader = world.npcs[source_residents[0]]
+        rival_leader.office_rank = 4
+        _found_polity(world, rival_leader.id, second_settlement_id)
+        polity_ids = list(world.polities)
+        _declare_war(world, polity_ids[0], polity_ids[1])
+        war_id = next(iter(world.war_states))
+        settlement = world.settlements[leader.settlement_id]
+        resident_id = next(npc_id for npc_id in settlement.resident_npc_ids if npc_id != leader.id)
+        before_support = world.war_states[war_id].war_support_levels[polity_ids[0]]
+        before_stability = settlement.stability
+        packet_id = emit_command_packet(world, leader.id, settlement.id, "muster_force")
+        world.history_index["packet_deliveries"][packet_id] = [resident_id]
+        run_political_phase(world.clone_for_phase(), world)
+        self.assertGreater(world.war_states[war_id].war_support_levels[polity_ids[0]], before_support)
+        self.assertLess(settlement.stability, before_stability)
+        self.assertTrue(world.history_index["war_command_log"])
+        self.assertTrue(
+            any(entry["kind"] == "war_mobilized" for entry in world.history_index["command_consequence_log"])
+        )
+
     def test_war_loot_first_enters_settlement_then_partially_remits(self) -> None:
         world = create_world(default_config(seed=45))
         leader = max(world.npcs.values(), key=lambda npc: npc.office_rank)
@@ -657,6 +726,68 @@ class CoreInvariantTests(unittest.TestCase):
         self.assertTrue(any(line.startswith("command_effect:") for line in debug_lines))
         self.assertTrue(any("taxable_output=" in line for line in settlement_lines))
         self.assertTrue(any("network_integrity=" in line for line in polity_lines))
+
+    def test_debug_view_surfaces_war_command_chain(self) -> None:
+        world = create_world(default_config(seed=64))
+        leader = max(world.npcs.values(), key=lambda npc: npc.office_rank)
+        _found_polity(world, leader.id, leader.settlement_id)
+        source_residents = [
+            npc.id
+            for npc in world.npcs.values()
+            if npc.settlement_id != leader.settlement_id and npc.id != leader.id
+        ][:3]
+        target_tile = next(
+            tile.id
+            for tile in world.tiles.values()
+            if tile.terrain_type == "plains" and tile.settlement_id is None
+        )
+        second_settlement_id = world.next_id("settlement")
+        world.settlements[second_settlement_id] = Settlement(
+            id=second_settlement_id,
+            name="Rival Debug Camp",
+            core_tile_id=target_tile,
+            member_tile_ids=[target_tile],
+            resident_npc_ids=[],
+            stored_resources={"food": 12.0, "wood": 5.0, "ore": 1.0, "wealth": 4.0},
+            security_level=48.0,
+            stability=56.0,
+            faction_id=None,
+            polity_id=None,
+            active_modifier_ids=[],
+            labor_pool=3.0,
+        )
+        assign_settlement_tiles(world, second_settlement_id, [target_tile])
+        for npc_id in source_residents:
+            move_npc_to_tile(world, npc_id, target_tile)
+            assign_npc_settlement(world, npc_id, second_settlement_id)
+        rival_faction_id = world.next_id("faction")
+        world.factions[rival_faction_id] = Faction(
+            id=rival_faction_id,
+            name="Rival Debug Ring",
+            leader_npc_id=source_residents[0],
+            member_npc_ids=[],
+            settlement_ids=[],
+            support_score=72.0,
+            cohesion=70.0,
+            agenda_type="survival",
+            legitimacy_seed_components={"support": 72.0},
+            active_modifier_ids=[],
+        )
+        for npc_id in source_residents:
+            assign_npc_faction(world, npc_id, rival_faction_id)
+        assign_settlement_faction(world, second_settlement_id, rival_faction_id)
+        rival_leader = world.npcs[source_residents[0]]
+        rival_leader.office_rank = 4
+        _found_polity(world, rival_leader.id, second_settlement_id)
+        polity_ids = list(world.polities)
+        _declare_war(world, polity_ids[0], polity_ids[1])
+        settlement = world.settlements[leader.settlement_id]
+        resident_id = next(npc_id for npc_id in settlement.resident_npc_ids if npc_id != leader.id)
+        packet_id = emit_command_packet(world, leader.id, settlement.id, "muster_force")
+        world.history_index["packet_deliveries"][packet_id] = [resident_id]
+        run_political_phase(world.clone_for_phase(), world)
+        debug_lines = debug_grade_step_report(world, world.current_step)
+        self.assertTrue(any(line.startswith("war_command:") for line in debug_lines))
 
 
 if __name__ == "__main__":

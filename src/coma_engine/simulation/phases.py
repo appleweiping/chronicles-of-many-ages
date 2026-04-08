@@ -159,6 +159,14 @@ def _draw_bundle_from_stock(stock: dict[str, float], demand_bundle: dict[str, fl
     return drawn
 
 
+def _active_wars_for_polity(world: WorldState, polity_id: str) -> list[WarState]:
+    return [
+        war
+        for war in world.war_states.values()
+        if war.status == "active" and polity_id in war.participant_polity_ids
+    ]
+
+
 def _executor_alignment_score(world: WorldState, executor_id: str, polity: Polity, settlement: Settlement) -> float:
     executor = world.npcs[executor_id]
     relation = executor.relationships.get(polity.ruler_npc_id, RelationEntry())
@@ -1337,6 +1345,7 @@ def _execute_command_chain(world: WorldState) -> None:
     resource_flow_log: list[dict[str, object]] = world.history_index["resource_flow_log"]  # type: ignore[assignment]
     command_consequence_log: list[dict[str, object]] = world.history_index["command_consequence_log"]  # type: ignore[assignment]
     legitimacy_log: list[dict[str, object]] = world.history_index["legitimacy_log"]  # type: ignore[assignment]
+    war_command_log: list[dict[str, object]] = world.history_index["war_command_log"]  # type: ignore[assignment]
     params = world.config.balance_parameters
     for packet in world.info_packets:
         if packet.content_domain != "command" or packet.id in executed_packets:
@@ -1643,6 +1652,25 @@ def _execute_command_chain(world: WorldState) -> None:
                     )
                     for npc_id in settlement.resident_npc_ids[:3]:
                         apply_relation_template_between(world, npc_id, polity.ruler_npc_id, "good_governance")
+                    active_wars = _active_wars_for_polity(world, polity.id)
+                    if active_wars:
+                        support_gain = delivery_value * params.allocation_war_support_gain_scale
+                        diversion_penalty = _bundle_value(diverted_bundle) * params.allocation_war_support_diversion_penalty
+                        for war in active_wars:
+                            war.war_support_levels[polity.id] = world.clamp_metric(
+                                war.war_support_levels.get(polity.id, 50.0) + support_gain - diversion_penalty
+                            )
+                            war_command_log.append(
+                                {
+                                    "step": world.current_step,
+                                    "war_id": war.id,
+                                    "polity_id": polity.id,
+                                    "settlement_id": settlement.id,
+                                    "command_subject": command_subject,
+                                    "support_delta": round(support_gain - diversion_penalty, 2),
+                                    "local_burden_delta": 0.0,
+                                }
+                            )
                     if skim_rate > 0.0:
                         integrity_delta = -skim_rate * params.command_skimming_integrity_penalty * 0.8
                         civil_order_delta = -skim_rate * params.command_skimming_civil_order_penalty * 0.6
@@ -1679,6 +1707,8 @@ def _execute_command_chain(world: WorldState) -> None:
                 settlement.stored_resources["food"] = max(0.0, settlement.stored_resources.get("food", 0.0) - combat_draw * 0.8)
                 polity.military_strength_base = world.clamp_metric(polity.military_strength_base + combat_draw * 4.0)
                 polity.war_readiness = world.clamp_metric(polity.war_readiness + combat_draw * 8.0)
+                local_burden_delta = -combat_draw * params.muster_local_burden_stability_penalty
+                settlement.stability = world.clamp_metric(settlement.stability + local_burden_delta)
                 resource_flow_log.append(
                     {
                         "step": world.current_step,
@@ -1690,6 +1720,46 @@ def _execute_command_chain(world: WorldState) -> None:
                         "mode": mode,
                         "combat_draw": round(combat_draw, 2),
                         "food_cost": round(combat_draw * 0.8, 2),
+                    }
+                )
+                active_wars = _active_wars_for_polity(world, polity.id)
+                support_delta = combat_draw * params.muster_war_support_gain_scale
+                for war in active_wars:
+                    war.war_support_levels[polity.id] = world.clamp_metric(
+                        war.war_support_levels.get(polity.id, 50.0) + support_delta
+                    )
+                    war_command_log.append(
+                        {
+                            "step": world.current_step,
+                            "war_id": war.id,
+                            "polity_id": polity.id,
+                            "settlement_id": settlement.id,
+                            "command_subject": command_subject,
+                            "support_delta": round(support_delta, 2),
+                            "local_burden_delta": round(local_burden_delta, 2),
+                        }
+                    )
+                command_consequence_log.append(
+                    {
+                        "step": world.current_step,
+                        "packet_id": packet.id,
+                        "settlement_id": settlement.id,
+                        "polity_id": polity.id,
+                        "kind": "war_mobilized",
+                        "integrity_delta": 0.0,
+                        "civil_order_delta": round(-combat_draw * 0.6, 2),
+                        "settlement_stability_delta": round(local_burden_delta, 2),
+                    }
+                )
+                polity.legitimacy_components["civil_order"] = world.clamp_metric(
+                    polity.legitimacy_components.get("civil_order", 50.0) - combat_draw * 0.6
+                )
+                legitimacy_log.append(
+                    {
+                        "step": world.current_step,
+                        "polity_id": polity.id,
+                        "kind": "war_mobilization",
+                        "delta": round(-combat_draw * 0.6, 2),
                     }
                 )
                 for npc_id in local_executors[:3]:
@@ -1818,8 +1888,20 @@ def _update_war_states(world: WorldState) -> None:
         attacker, defender = participants[0], participants[1]
         attacker_profile = _polity_population_profile(world, attacker.id)
         defender_profile = _polity_population_profile(world, defender.id)
-        attacker_strength = attacker.military_strength_base + attacker.war_readiness * 0.4 + attacker_profile["combat"] * 2.0
-        defender_strength = defender.military_strength_base + defender.war_readiness * 0.4 + defender_profile["combat"] * 2.0
+        attacker_support = war.war_support_levels.get(attacker.id, 50.0)
+        defender_support = war.war_support_levels.get(defender.id, 50.0)
+        attacker_strength = (
+            attacker.military_strength_base
+            + attacker.war_readiness * 0.4
+            + attacker_profile["combat"] * 2.0
+            + attacker_support * params.war_support_strength_scale
+        )
+        defender_strength = (
+            defender.military_strength_base
+            + defender.war_readiness * 0.4
+            + defender_profile["combat"] * 2.0
+            + defender_support * params.war_support_strength_scale
+        )
         capital_distance = shortest_path_cost(
             world,
             world.settlements[attacker.capital_settlement_id].core_tile_id,
@@ -1830,7 +1912,12 @@ def _update_war_states(world: WorldState) -> None:
         average_strength = (attacker_strength + defender_strength) / 2.0
         war.effective_front_pressure = max(5.0, average_strength * 0.08 - capital_distance)
         war.expected_attrition = max(1.0, world.config.balance_parameters.war_attrition_scale * average_strength * 0.1)
-        war.escalation_risk = min(100.0, war.effective_front_pressure + sum(war.war_fatigue_levels.values()) * 0.25)
+        war.escalation_risk = min(
+            100.0,
+            war.effective_front_pressure
+            + sum(war.war_fatigue_levels.values()) * 0.25
+            + (100.0 - min(attacker_support, defender_support)) * 0.1,
+        )
         participant_profiles = {
             attacker.id: attacker_profile,
             defender.id: defender_profile,

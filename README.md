@@ -42,11 +42,11 @@ This repository implements the first-pass formal systems foundation described in
 - Active organization mirrors are cleaned on archive while archived objects remain resolvable for history/debug use
 - First-pass continuous-action semantics for partial progress, interruption, and outcome recording
 - First-pass demographic loop with aging, birth/death records, and labor/combat population separation
-- First-pass war loop with attrition, strain, settlement-level supply draw, war-support feedback, loot capture into settlements, partial remittance to polity treasury, and peace-tension feedback
+- First-pass war loop with attrition, strain, settlement-level supply draw, war-support feedback, muster-to-support command coupling, loot capture into settlements, partial remittance to polity treasury, and peace-tension feedback
 - Relation templates now enter execution outcomes and command-chain consequences
 - Memory conversion now feeds back into formal belief-signal propagation instead of disappearing as dead data
 - Formal player intervention queue restricted to approved channels
-- Debug/player explain surfaces now expose command-side effects, resource-flow traces, and higher-level settlement/polity summaries
+- Debug/player explain surfaces now expose command-side effects, resource-flow traces, war-command traces, and higher-level settlement/polity summaries
 - Core invariant tests for replayability, reference consistency, political gating, phase snapshots, action interruption, and command-chain delay
 - Additional invariant tests for local skimming, archive-safe mirror cleanup, war-loot remittance, and resource-chain explainability
 
