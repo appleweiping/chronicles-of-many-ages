@@ -48,6 +48,7 @@ This repository implements the first-pass formal systems foundation described in
 - Memory conversion now feeds back into formal belief-signal propagation instead of disappearing as dead data
 - Debug/player explain surfaces now expose command-side effects, resource-flow traces, war-command traces, war-supply traces, legitimacy-source mixes, and higher-level settlement/polity summaries
 - Player-facing summaries now maintain a minimal knowledge boundary, so unknown entities can remain rumored while known entities expose richer summaries
+- Interactive player queries now include `history`, `known`, and `why <entity>` commands for tracing recent formal causes without dropping into debug-grade output
 - Formal player intervention queue restricted to approved channels
 - Core invariant tests for replayability, reference consistency, political gating, phase snapshots, action interruption, and command-chain delay
 - Additional invariant tests for local skimming, archive-safe mirror cleanup, war-loot remittance, war-belief propagation, perception specificity, player knowledge gating, and resource-chain explainability
@@ -73,13 +74,18 @@ This repository can now run the formal simulation backbone from the command line
 
 Interactive shell commands:
 
+- `help`: print the interactive command list
 - `step`: advance one simulation step
 - `map`: print a compact terrain and settlement map
+- `history`: print recent player-visible events
 - `known`: print currently known entities and regions at the player layer
 - `npc <npc_id>`: inspect one NPC summary
 - `settlement <settlement_id>`: inspect one settlement summary
 - `polity <polity_id>`: inspect one polity summary
 - `war <war_id>`: inspect one war summary
+- `why settlement <settlement_id>`: explain recent local resource and command factors
+- `why polity <polity_id>`: explain recent legitimacy, command, and war-support factors
+- `why war <war_id>`: explain recent war supply and war-command factors
 - `bless <npc_id>`: queue a player modifier intervention
 - `resource <tile_or_settlement_id>`: queue a player resource modifier intervention
 - `rumor <tile_id>`: queue an information intervention

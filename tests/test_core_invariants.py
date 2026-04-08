@@ -25,7 +25,10 @@ from coma_engine.explain import (
     player_grade_known_entities,
     player_grade_npc_summary,
     player_grade_polity_summary,
+    player_grade_polity_recent_factors,
     player_grade_settlement_summary,
+    player_grade_settlement_recent_factors,
+    player_grade_war_recent_factors,
     player_grade_war_summary,
 )
 from coma_engine.models.entities import Event, Faction, MemoryEntry, RelationEntry, Settlement
@@ -987,6 +990,82 @@ class CoreInvariantTests(unittest.TestCase):
         known_lines = player_grade_known_entities(world)
         self.assertTrue(any("visibility=rumored" in line for line in lines))
         self.assertTrue(any(line.startswith("known_entities=") for line in known_lines))
+
+    def test_player_grade_recent_factor_views_surface_known_causes(self) -> None:
+        world = create_world(default_config(seed=70))
+        leader = max(world.npcs.values(), key=lambda npc: npc.office_rank)
+        _found_polity(world, leader.id, leader.settlement_id)
+        polity_id = next(iter(world.polities))
+        settlement_id = leader.settlement_id
+        run_political_phase(world.clone_for_phase(), world)
+        polity_lines = player_grade_polity_recent_factors(world, polity_id)
+        settlement_lines = player_grade_settlement_recent_factors(world, settlement_id)
+        self.assertTrue(any(line.startswith("legitimacy_mix:") for line in polity_lines))
+        self.assertTrue(any(line.startswith("flow:") for line in settlement_lines))
+
+    def test_player_war_recent_factors_surface_supply_and_command(self) -> None:
+        world = create_world(default_config(seed=71))
+        leader = max(world.npcs.values(), key=lambda npc: npc.office_rank)
+        _found_polity(world, leader.id, leader.settlement_id)
+        source_residents = [
+            npc.id
+            for npc in world.npcs.values()
+            if npc.settlement_id != leader.settlement_id and npc.id != leader.id
+        ][:3]
+        target_tile = next(
+            tile.id
+            for tile in world.tiles.values()
+            if tile.terrain_type == "plains" and tile.settlement_id is None
+        )
+        second_settlement_id = world.next_id("settlement")
+        world.settlements[second_settlement_id] = Settlement(
+            id=second_settlement_id,
+            name="War Why Camp",
+            core_tile_id=target_tile,
+            member_tile_ids=[target_tile],
+            resident_npc_ids=[],
+            stored_resources={"food": 6.0, "wood": 1.0, "ore": 0.5, "wealth": 2.0},
+            security_level=48.0,
+            stability=56.0,
+            faction_id=None,
+            polity_id=None,
+            active_modifier_ids=[],
+            labor_pool=3.0,
+        )
+        assign_settlement_tiles(world, second_settlement_id, [target_tile])
+        for npc_id in source_residents:
+            move_npc_to_tile(world, npc_id, target_tile)
+            assign_npc_settlement(world, npc_id, second_settlement_id)
+        rival_faction_id = world.next_id("faction")
+        world.factions[rival_faction_id] = Faction(
+            id=rival_faction_id,
+            name="War Why Ring",
+            leader_npc_id=source_residents[0],
+            member_npc_ids=[],
+            settlement_ids=[],
+            support_score=72.0,
+            cohesion=70.0,
+            agenda_type="survival",
+            legitimacy_seed_components={"support": 72.0},
+            active_modifier_ids=[],
+        )
+        for npc_id in source_residents:
+            assign_npc_faction(world, npc_id, rival_faction_id)
+        assign_settlement_faction(world, second_settlement_id, rival_faction_id)
+        rival_leader = world.npcs[source_residents[0]]
+        rival_leader.office_rank = 4
+        _found_polity(world, rival_leader.id, second_settlement_id)
+        polity_ids = list(world.polities)
+        _declare_war(world, polity_ids[0], polity_ids[1])
+        settlement = world.settlements[leader.settlement_id]
+        resident_id = next(npc_id for npc_id in settlement.resident_npc_ids if npc_id != leader.id)
+        packet_id = emit_command_packet(world, leader.id, settlement.id, "muster_force")
+        world.history_index["packet_deliveries"][packet_id] = [resident_id]
+        run_political_phase(world.clone_for_phase(), world)
+        war_id = next(iter(world.war_states))
+        war_lines = player_grade_war_recent_factors(world, war_id)
+        self.assertTrue(any(line.startswith("supply:") for line in war_lines))
+        self.assertTrue(any(line.startswith("command:") for line in war_lines))
 
 
 if __name__ == "__main__":

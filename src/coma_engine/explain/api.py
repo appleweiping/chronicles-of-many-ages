@@ -300,3 +300,93 @@ def player_grade_war_summary(world: WorldState, war_id: str) -> list[str]:
         f"support={{{', '.join(f'{pid}:{_trend_label(war.war_support_levels.get(pid, 0.0))}' for pid in known_participants)}}}",
         f"fatigue={{{', '.join(f'{pid}:{_trend_label(war.war_fatigue_levels.get(pid, 0.0))}' for pid in known_participants)}}}",
     ]
+
+
+def player_grade_settlement_recent_factors(world: WorldState, settlement_id: str, limit: int = 4) -> list[str]:
+    _ensure_player_bootstrap(world)
+    settlement = world.entity_by_ref(settlement_id)
+    if settlement is None:
+        return [f"{settlement_id} not found"]
+    if not _player_knows_ref(world, settlement_id):
+        return [f"{settlement.id}", "visibility=rumored", "recent causes hidden at the player layer"]
+    lines = [f"why {settlement.id}"]
+    resource_flow_log: list[dict[str, object]] = world.history_index["resource_flow_log"]  # type: ignore[assignment]
+    related_flows = [entry for entry in reversed(resource_flow_log) if entry.get("settlement_id") == settlement_id][:limit]
+    for entry in related_flows:
+        lines.append(
+            "flow:"
+            f"{entry.get('flow_type')}:"
+            f"step={entry.get('step')}"
+        )
+    command_consequence_log: list[dict[str, object]] = world.history_index["command_consequence_log"]  # type: ignore[assignment]
+    related_effects = [entry for entry in reversed(command_consequence_log) if entry.get("settlement_id") == settlement_id][:limit]
+    for entry in related_effects:
+        lines.append(
+            "effect:"
+            f"{entry.get('kind')}:"
+            f"civil_order={entry.get('civil_order_delta')}:"
+            f"stability={entry.get('settlement_stability_delta')}"
+        )
+    if len(lines) == 1:
+        lines.append("no recent local factors recorded")
+    return lines
+
+
+def player_grade_polity_recent_factors(world: WorldState, polity_id: str, limit: int = 4) -> list[str]:
+    _ensure_player_bootstrap(world)
+    polity = world.entity_by_ref(polity_id)
+    if polity is None:
+        return [f"{polity_id} not found"]
+    if not _player_knows_ref(world, polity_id):
+        return [f"{polity.id}", "visibility=rumored", "legitimacy and command causes hidden at the player layer"]
+    lines = [f"why {polity.id}"]
+    legitimacy_source_log: list[dict[str, object]] = world.history_index["legitimacy_source_log"]  # type: ignore[assignment]
+    for entry in [item for item in reversed(legitimacy_source_log) if item.get("polity_id") == polity_id][:1]:
+        lines.append(
+            "legitimacy_mix:"
+            f"support={entry.get('support')}:civil_order={entry.get('civil_order')}:"
+            f"war_strain={entry.get('war_strain')}:reach={entry.get('reach')}:network={entry.get('network')}"
+        )
+    legitimacy_log: list[dict[str, object]] = world.history_index["legitimacy_log"]  # type: ignore[assignment]
+    for entry in [item for item in reversed(legitimacy_log) if item.get("polity_id") == polity_id][:limit]:
+        lines.append(
+            "legitimacy_shift:"
+            f"{entry.get('kind')}:delta={entry.get('delta')}"
+        )
+    war_command_log: list[dict[str, object]] = world.history_index["war_command_log"]  # type: ignore[assignment]
+    for entry in [item for item in reversed(war_command_log) if item.get("polity_id") == polity_id][:limit]:
+        lines.append(
+            "war_command:"
+            f"{entry.get('command_subject')}:support={entry.get('support_delta')}:burden={entry.get('local_burden_delta')}"
+        )
+    if len(lines) == 1:
+        lines.append("no recent polity factors recorded")
+    return lines
+
+
+def player_grade_war_recent_factors(world: WorldState, war_id: str, limit: int = 4) -> list[str]:
+    _ensure_player_bootstrap(world)
+    war = world.war_states.get(war_id)
+    if war is None:
+        return [f"{war_id} not found"]
+    known_participants = [polity_id for polity_id in war.participant_polity_ids if _player_knows_ref(world, polity_id)]
+    if not known_participants:
+        return [f"{war.id}", "visibility=rumored", "recent war factors hidden at the player layer"]
+    lines = [f"why {war.id}"]
+    war_supply_log: list[dict[str, object]] = world.history_index["war_supply_log"]  # type: ignore[assignment]
+    for entry in [item for item in reversed(war_supply_log) if item.get("war_id") == war_id][:limit]:
+        lines.append(
+            "supply:"
+            f"{entry.get('polity_id')}:{entry.get('kind')}:"
+            f"value={entry.get('drawn_value')}:ratio={entry.get('supply_ratio')}"
+        )
+    war_command_log: list[dict[str, object]] = world.history_index["war_command_log"]  # type: ignore[assignment]
+    for entry in [item for item in reversed(war_command_log) if item.get("war_id") == war_id][:limit]:
+        lines.append(
+            "command:"
+            f"{entry.get('polity_id')}:{entry.get('command_subject')}:"
+            f"support={entry.get('support_delta')}:burden={entry.get('local_burden_delta')}"
+        )
+    if len(lines) == 1:
+        lines.append("no recent war factors recorded")
+    return lines

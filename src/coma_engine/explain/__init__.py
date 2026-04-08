@@ -6,8 +6,11 @@ from coma_engine.explain.api import (
     player_grade_known_entities,
     player_grade_npc_summary,
     player_grade_polity_summary,
+    player_grade_polity_recent_factors,
     player_grade_recent_history,
+    player_grade_settlement_recent_factors,
     player_grade_settlement_summary,
+    player_grade_war_recent_factors,
     player_grade_war_summary,
     player_grade_world_summary,
 )
@@ -18,8 +21,11 @@ __all__ = [
     "player_grade_known_entities",
     "player_grade_npc_summary",
     "player_grade_polity_summary",
+    "player_grade_polity_recent_factors",
     "player_grade_recent_history",
+    "player_grade_settlement_recent_factors",
     "player_grade_settlement_summary",
+    "player_grade_war_recent_factors",
     "player_grade_war_summary",
     "player_grade_world_summary",
 ]

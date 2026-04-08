@@ -8,8 +8,11 @@ from coma_engine.explain import (
     player_grade_known_entities,
     player_grade_npc_summary,
     player_grade_polity_summary,
+    player_grade_polity_recent_factors,
     player_grade_recent_history,
+    player_grade_settlement_recent_factors,
     player_grade_settlement_summary,
+    player_grade_war_recent_factors,
     player_grade_war_summary,
     player_grade_world_summary,
 )
@@ -94,7 +97,7 @@ def run_cli(argv: list[str] | None = None) -> int:
 
 
 def _interactive_shell(world) -> bool:
-    print("Commands: step, map, known, npc <id>, settlement <id>, polity <id>, war <id>, bless <npc_id>, resource <tile_or_settlement_id>, rumor <tile_id>, miracle <tile_id>, quit")
+    print("Commands: help, step, map, history, known, npc <id>, settlement <id>, polity <id>, war <id>, why settlement <id>, why polity <id>, why war <id>, bless <npc_id>, resource <tile_or_settlement_id>, rumor <tile_id>, miracle <tile_id>, quit")
     while True:
         try:
             raw = input("coma> ").strip()
@@ -102,10 +105,17 @@ def _interactive_shell(world) -> bool:
             return False
         if not raw or raw == "step":
             return True
+        if raw == "help":
+            print("Commands: help, step, map, history, known, npc <id>, settlement <id>, polity <id>, war <id>, why settlement <id>, why polity <id>, why war <id>, bless <npc_id>, resource <tile_or_settlement_id>, rumor <tile_id>, miracle <tile_id>, quit")
+            continue
         if raw == "quit":
             return False
         if raw == "map":
             _print_map(world)
+            continue
+        if raw == "history":
+            for line in player_grade_recent_history(world, limit=8):
+                print(line)
             continue
         if raw == "known":
             for line in player_grade_known_entities(world):
@@ -126,6 +136,18 @@ def _interactive_shell(world) -> bool:
             continue
         if parts[0] == "war" and len(parts) == 2 and parts[1] in world.war_states:
             for line in player_grade_war_summary(world, parts[1]):
+                print(line)
+            continue
+        if parts[0] == "why" and len(parts) == 3 and parts[1] == "settlement":
+            for line in player_grade_settlement_recent_factors(world, parts[2]):
+                print(line)
+            continue
+        if parts[0] == "why" and len(parts) == 3 and parts[1] == "polity":
+            for line in player_grade_polity_recent_factors(world, parts[2]):
+                print(line)
+            continue
+        if parts[0] == "why" and len(parts) == 3 and parts[1] == "war":
+            for line in player_grade_war_recent_factors(world, parts[2]):
                 print(line)
             continue
         if parts[0] == "bless" and len(parts) == 2 and parts[1] in world.npcs:
