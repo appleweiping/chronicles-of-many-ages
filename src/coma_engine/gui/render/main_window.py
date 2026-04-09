@@ -1,7 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QMainWindow, QSplitter, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QMainWindow, QSplitter, QVBoxLayout, QWidget
 
 from coma_engine.gui.interaction import (
     CameraController,
@@ -12,21 +12,25 @@ from coma_engine.gui.interaction import (
     TimeController,
 )
 from coma_engine.gui.presentation import (
+    build_alert_stack,
+    build_chronicle_stream,
     build_debug_lines,
     build_inspection_panel,
     build_intervention_options,
-    build_player_history,
+    build_timeline_groups,
+    build_top_bar,
+    build_world_status,
+    pick_default_focus_ref,
 )
 from coma_engine.gui.render.map_scene import MapScene
 from coma_engine.gui.render.map_view import MapView
-from coma_engine.gui.render.panels.control_panel import ControlPanel
+from coma_engine.gui.render.panels.action_ribbon import ActionRibbon
+from coma_engine.gui.render.panels.alert_panel import AlertPanel
+from coma_engine.gui.render.panels.chronicle_panel import ChroniclePanel
 from coma_engine.gui.render.panels.inspector_panel import InspectorPanel
-from coma_engine.gui.render.panels.intervention_panel import InterventionPanel
-from coma_engine.gui.render.panels.overlay_panel import OverlayPanel
 from coma_engine.gui.render.panels.status_panel import StatusPanel
 from coma_engine.gui.render.panels.timeline_panel import TimelinePanel
-from coma_engine.gui.render.widgets.legend_widget import LegendWidget
-from coma_engine.gui.render.widgets.phase_strip import PhaseStrip
+from coma_engine.gui.render.panels.top_bar import TopBar
 from coma_engine.gui.session import GuiSession
 
 
@@ -35,7 +39,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.session = session
         self.setWindowTitle("Chronicles of Many Ages")
-        self.resize(1440, 900)
+        self.resize(1540, 960)
 
         self.selection = SelectionController(session)
         self.camera = CameraController(session)
@@ -46,46 +50,64 @@ class MainWindow(QMainWindow):
 
         root = QWidget()
         root_layout = QVBoxLayout(root)
+        root_layout.setContentsMargins(6, 6, 6, 6)
+        root_layout.setSpacing(6)
         self.setCentralWidget(root)
+        self.setStyleSheet(
+            "QMainWindow, QWidget { background-color: #10161e; color: #dfe7f2; }"
+            "QGroupBox, QFrame { border: 1px solid #2a3948; background-color: #16202a; }"
+            "QLabel { color: #dfe7f2; }"
+            "QPushButton { background-color: #223247; color: #f5f7fb; padding: 6px 10px; border-radius: 6px; }"
+            "QPushButton:disabled { color: #738393; background-color: #1a242f; }"
+            "QListWidget { background-color: #16202a; border: 1px solid #2e3f4f; }"
+        )
 
-        self.phase_strip = PhaseStrip()
-        self.status_panel = StatusPanel()
-        self.control_panel = ControlPanel(self._step_once, self._pause, self._resume)
-        root_layout.addWidget(self.phase_strip)
-        root_layout.addWidget(self.control_panel)
-        root_layout.addWidget(self.status_panel)
+        self.top_bar = TopBar(self._step_once, self._pause, self._resume)
+        root_layout.addWidget(self.top_bar)
 
-        splitter = QSplitter()
-        root_layout.addWidget(splitter, stretch=1)
+        shell = QSplitter()
+        root_layout.addWidget(shell, stretch=1)
+
+        self.left_column = QWidget()
+        left_layout = QVBoxLayout(self.left_column)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
+        self.alert_panel = AlertPanel(self._on_alert_select)
+        self.chronicle_panel = ChroniclePanel(self._on_focus_select)
+        left_layout.addWidget(self.alert_panel, stretch=4)
+        left_layout.addWidget(self.chronicle_panel, stretch=6)
+        shell.addWidget(self.left_column)
 
         self.map_scene = MapScene(session.projections, self._on_select)
         self.map_view = MapView(self.map_scene)
-        splitter.addWidget(self.map_view)
+        shell.addWidget(self.map_view)
 
-        side_tabs = QTabWidget()
-        splitter.addWidget(side_tabs)
+        self.right_column = QWidget()
+        right_layout = QVBoxLayout(self.right_column)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
+        self.status_panel = StatusPanel()
+        self.inspector_panel = InspectorPanel(self._on_affordance)
+        right_layout.addWidget(self.status_panel)
+        right_layout.addWidget(self.inspector_panel, stretch=1)
+        self.debug_panel = TimelinePanel(title="Debug Trace") if self.session.view_state.debug_mode else None
+        if self.debug_panel is not None:
+            right_layout.addWidget(self.debug_panel, stretch=1)
+        shell.addWidget(self.right_column)
+        shell.setSizes([180, 990, 330])
 
-        inspector_page = QWidget()
-        inspector_layout = QVBoxLayout(inspector_page)
-        self.inspector_panel = InspectorPanel()
-        self.intervention_panel = InterventionPanel(self._dispatch_action)
-        inspector_layout.addWidget(self.inspector_panel)
-        inspector_layout.addWidget(self.intervention_panel)
-        side_tabs.addTab(inspector_page, "Inspect")
-
-        timeline_page = QWidget()
-        timeline_layout = QVBoxLayout(timeline_page)
-        self.timeline_panel = TimelinePanel()
-        self.debug_panel = TimelinePanel()
-        timeline_layout.addWidget(self.timeline_panel)
-        timeline_layout.addWidget(self.debug_panel)
-        side_tabs.addTab(timeline_page, "History")
-
-        overlay_page = QWidget()
-        overlay_layout = QVBoxLayout(overlay_page)
-        overlay_layout.addWidget(OverlayPanel(self._toggle_overlay, set(self.session.view_state.active_overlays)))
-        overlay_layout.addWidget(LegendWidget())
-        side_tabs.addTab(overlay_page, "Overlays")
+        self.action_ribbon = ActionRibbon(
+            self._step_once,
+            self._resume,
+            self._pause,
+            self._step_batch,
+            self._set_map_mode,
+            self._select_action,
+            self._commit_selected_action,
+            self._cycle_overlay,
+            self._review_objectives,
+        )
+        root_layout.addWidget(self.action_ribbon)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick_if_running)
@@ -99,41 +121,150 @@ class MainWindow(QMainWindow):
         self.time.pause()
         self.session.step_once()
 
+    def _step_batch(self) -> None:
+        self.time.pause()
+        for _ in range(5):
+            self.session.step_once()
+
     def _pause(self) -> None:
         self.time.pause()
+        if self.session.current_frame is not None:
+            self._refresh_from_frame(self.session.current_frame)
 
     def _resume(self) -> None:
         self.time.resume()
+        if self.session.current_frame is not None:
+            self._refresh_from_frame(self.session.current_frame)
 
     def _tick_if_running(self) -> None:
         if self.session.view_state.running:
-            self.session.step_once()
+            if self.session.view_state.speed_mode == "burst":
+                for _ in range(3):
+                    self.session.step_once()
+            else:
+                self.session.step_once()
 
-    def _toggle_overlay(self, overlay_name: str, enabled: bool) -> None:
-        self.overlays.set_enabled(overlay_name, enabled)
+    def _set_map_mode(self, map_mode: str) -> None:
+        self.overlays.set_map_mode(map_mode)
         if self.session.current_frame is not None:
-            self.map_scene.render_frame(self.session.view_state.active_overlays, self.session.view_state.selected_ref)
+            self._refresh_from_frame(self.session.current_frame)
+
+    def _cycle_overlay(self) -> None:
+        fog_enabled = "fog" in self.session.view_state.active_overlays
+        self.overlays.set_enabled("fog", not fog_enabled)
+        if self.session.current_frame is not None:
+            self._refresh_from_frame(self.session.current_frame)
+
+    def _review_objectives(self) -> None:
+        if self.session.world.player_state.active_objectives:
+            self.status_panel.summary_label.setText(
+                "  |  ".join(
+                    f"{objective.objective_type} {objective.progress:.0f}/{objective.threshold:.0f}"
+                    for objective in self.session.world.player_state.active_objectives[:3]
+                )
+            )
+
+    def _select_action(self, action_id: str, target_ref: str) -> None:
+        self.session.select_action(action_id, target_ref)
+        if self.session.current_frame is not None:
+            self._refresh_from_frame(self.session.current_frame)
+
+    def _commit_selected_action(self) -> None:
+        action_id = self.session.view_state.selected_action_id
+        target_ref = self.session.view_state.selected_action_target_ref
+        if action_id and target_ref:
+            self.commands.dispatch(action_id, target_ref)
+            if self.session.current_frame is not None:
+                self._refresh_from_frame(self.session.current_frame)
 
     def _on_select(self, ref: str | None) -> None:
         self.selection.select(ref)
         if self.session.current_frame is not None:
             self._refresh_from_frame(self.session.current_frame)
 
-    def _dispatch_action(self, action_id: str, target_ref: str) -> None:
-        self.commands.dispatch(action_id, target_ref)
-        if self.session.current_frame is not None:
+    def _on_focus_select(self, ref: str | None) -> None:
+        self.selection.select(ref)
+        if ref is not None and self.session.current_frame is not None:
+            self._focus_map_on_ref(ref)
             self._refresh_from_frame(self.session.current_frame)
 
-    def _refresh_from_frame(self, frame) -> None:
-        self.phase_strip.set_time_state(frame.time_state)
-        self.status_panel.update_from_frame(frame, self.session.view_state.selected_ref)
-        self.map_scene.render_frame(self.session.view_state.active_overlays, self.session.view_state.selected_ref)
+    def _on_alert_select(self, ref: str | None, suggested_mode=None) -> None:
+        if isinstance(suggested_mode, str):
+            self._set_map_mode(suggested_mode)
+        self._on_focus_select(ref)
 
+    def _on_affordance(self, label: str, ref: str) -> None:
+        if label in {"Focus on map", "Show on timeline", "Pin to timeline", "Open event chain"}:
+            self._focus_map_on_ref(ref)
+            return
+        entity = self.session.world.entity_by_ref(ref)
+        if entity is None:
+            return
+        target_ref: str | None = None
+        if label == "Inspect associated settlement":
+            target_ref = getattr(entity, "settlement_id", None) or getattr(entity, "capital_settlement_id", None)
+        elif label == "Inspect associated polity":
+            target_ref = getattr(entity, "polity_id", None)
+        elif label == "Show related settlement":
+            target_ref = getattr(entity, "settlement_id", None)
+        if target_ref is not None:
+            self._on_focus_select(target_ref)
+
+    def _focus_map_on_ref(self, ref: str) -> None:
+        frame = self.session.current_frame
+        if frame is None:
+            return
+        tile_ref: str | None = None
+        if ref.startswith("tile:"):
+            tile_ref = ref
+        else:
+            entity = self.session.world.entity_by_ref(ref)
+            tile_ref = getattr(entity, "location_tile_id", None) or getattr(entity, "core_tile_id", None)
+            if tile_ref is None and hasattr(entity, "capital_settlement_id"):
+                settlement = self.session.world.entity_by_ref(getattr(entity, "capital_settlement_id"))
+                tile_ref = getattr(settlement, "core_tile_id", None)
+            if tile_ref is None and hasattr(entity, "participant_polity_ids"):
+                for polity_id in getattr(entity, "participant_polity_ids", []):
+                    polity = self.session.world.entity_by_ref(polity_id)
+                    settlement = self.session.world.entity_by_ref(getattr(polity, "capital_settlement_id", None)) if polity else None
+                    tile_ref = getattr(settlement, "core_tile_id", None)
+                    if tile_ref is not None:
+                        break
+        if tile_ref is None:
+            return
+        tile = next((item for item in frame.tiles if item.ref == tile_ref), None)
+        if tile is not None:
+            zoom = 2.0 if ref.startswith("tile:") else 1.5 if ref.startswith(("npc:", "settlement:")) else 1.1
+            self.map_view.focus_on_tile(tile.x, tile.y, zoom_level=zoom)
+
+    def _refresh_from_frame(self, frame) -> None:
+        alerts = build_alert_stack(self.session.world, frame)
+        if self.session.view_state.selected_ref is None:
+            self.selection.select(pick_default_focus_ref(frame, alerts))
         selected_ref = self.session.view_state.selected_ref or (frame.tiles[0].ref if frame.tiles else None)
+
+        if selected_ref is not None and self.session.world.entity_by_ref(selected_ref) is None and not selected_ref.startswith("tile:"):
+            fallback = pick_default_focus_ref(frame, alerts)
+            self.selection.select(fallback)
+            selected_ref = fallback
+
+        self.top_bar.render(build_top_bar(self.session.world, frame, self.session.view_state))
+        status = build_world_status(self.session.world, frame)
+        self.status_panel.update_from_frame(frame, selected_ref, status)
+        self.alert_panel.set_alerts(alerts)
+        self.chronicle_panel.set_items(build_chronicle_stream(self.session.world, frame))
+        self.chronicle_panel.set_history_groups(build_timeline_groups(self.session.world, frame, historical_scale=True))
+        self.map_scene.render_frame(self.session.view_state.active_overlays, selected_ref, self.session.view_state.current_map_mode)
+        self.action_ribbon.set_mode(self.session.view_state.current_map_mode)
+
         if selected_ref is not None:
             panel = build_inspection_panel(self.session.world, selected_ref, debug_mode=self.session.view_state.debug_mode)
             self.inspector_panel.render_panel(panel)
-            self.intervention_panel.set_options(build_intervention_options(selected_ref))
+            options = build_intervention_options(selected_ref)
+            if self.session.view_state.selected_action_target_ref != selected_ref:
+                default_option = next((option for option in options if option.enabled), None)
+                self.session.select_action(default_option.action_id if default_option else None, selected_ref)
+            self.action_ribbon.set_options(options, self.session.view_state.selected_action_id, selected_ref)
 
-        self.timeline_panel.set_lines(build_player_history(self.session.world, frame))
-        self.debug_panel.set_lines(build_debug_lines(self.session.world, frame)[:18])
+        if self.debug_panel is not None:
+            self.debug_panel.set_lines(build_debug_lines(self.session.world, frame)[:18])

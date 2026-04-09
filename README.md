@@ -36,7 +36,7 @@ This repository treats `遊戲製作.md` as the sole design source of truth. The
 - War support, strain, supply pressure, readiness feedback, and legitimacy-side effects
 - Event, memory, and belief-signal propagation with player/debug explanation support
 - Player-facing CLI shell for stepping time, inspecting the world, and queuing interventions
-- Formal GUI stage 1 architecture with synchronization, presentation, interaction, and rendering layers
+- Formal GUI with synchronization, presentation, interaction, rendering, and a five-region game-facing main screen
 
 ## Formal GUI layer
 
@@ -52,9 +52,14 @@ Current GUI stage coverage:
 - GUI session object tied to the existing simulation engine
 - Snapshot synchronizer and projection store
 - Tile-grid projection, entity projection, timeline projection, and info-flow projection
-- Player-grade inspection panel builders and timeline grouping
+- Fixed five-region shell: top global bar, left alert/chronicle column, central world viewport, right contextual inspector, bottom action ribbon
+- Five named map modes: World, Control, Resources, Pressure, and InfoFlow
+- Map readability pass with terrain substrate, polity power cues, pressure hotspots, scarcity/command overlays, and info-flow traces
+- Player-grade inspection panels organized as identity, situational summary, structured detail, and contextual affordances
+- Alert stack and chronicle stream derived from formal events and projections rather than raw log spam
+- Bottom action ribbon that translates legal intervention channels into player-language affordances with non-authoritative previews
 - Formal intervention bridge that only queues existing intervention channels
-- Qt-based window, map view, panels, and status controls
+- Qt-based window, map-dominant viewport, top strategic strip, synchronized side columns, and contextual action flow
 - Root launcher at `run_gui.py`
 
 ## Running the project
@@ -124,6 +129,7 @@ The test suite covers:
 - GUI projection invariants
 - GUI visibility rules
 - GUI intervention bridging
+- GUI gameplay-layer main-screen behavior
 
 ## Scope
 

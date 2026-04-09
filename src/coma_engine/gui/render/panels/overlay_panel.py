@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtWidgets import QCheckBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QLabel, QVBoxLayout, QWidget
 
 
 class OverlayPanel(QWidget):
@@ -8,7 +8,8 @@ class OverlayPanel(QWidget):
         super().__init__()
         layout = QVBoxLayout(self)
         self._checkboxes: dict[str, QCheckBox] = {}
-        for name in ("terrain", "control", "activity", "infoflow"):
+        layout.addWidget(QLabel("Map Layers"))
+        for name in ("terrain", "power", "attention", "signals", "fog"):
             checkbox = QCheckBox(name)
             checkbox.setChecked(name in initial_active)
             checkbox.toggled.connect(lambda checked, overlay=name: on_toggle(overlay, checked))

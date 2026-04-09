@@ -15,3 +15,6 @@ class OverlayController:
 
     def is_enabled(self, overlay_name: str) -> bool:
         return overlay_name in self.session.view_state.active_overlays
+
+    def set_map_mode(self, map_mode: str) -> None:
+        self.session.view_state.current_map_mode = map_mode  # type: ignore[assignment]

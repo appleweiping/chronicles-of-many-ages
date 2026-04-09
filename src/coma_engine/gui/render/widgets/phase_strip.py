@@ -19,6 +19,11 @@ class PhaseStrip(QWidget):
         for phase_name in time_state.phase_order:
             label = QLabel(phase_name)
             if phase_name in time_state.completed_phases:
-                label.setStyleSheet("font-weight: bold; color: #d8e7ff;")
+                label.setStyleSheet(
+                    "font-weight: bold; color: #d8e7ff; background-color: #223247; padding: 4px 8px; border-radius: 6px;"
+                )
+            else:
+                label.setStyleSheet("color: #76879a; padding: 4px 8px;")
             self.layout.addWidget(label)
             self.labels.append(label)
+        self.layout.addStretch(1)

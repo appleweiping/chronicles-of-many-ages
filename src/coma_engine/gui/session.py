@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from coma_engine.core.state import WorldState
+from coma_engine.explain import player_grade_world_summary
 from coma_engine.gui.sync.projection_store import ProjectionStore
 from coma_engine.gui.sync.snapshot_sync import SnapshotSynchronizer
 from coma_engine.gui.types import GuiViewState, WorldFrameProjection
@@ -23,6 +24,7 @@ class GuiSession:
     _listeners: list[ProjectionListener] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        player_grade_world_summary(self.world)
         self.engine = SimulationEngine(self.world)
         self.projections = ProjectionStore()
         self.synchronizer = SnapshotSynchronizer(self.projections)
@@ -52,6 +54,10 @@ class GuiSession:
 
     def select_ref(self, ref: str | None) -> None:
         self.view_state.selected_ref = ref
+
+    def select_action(self, action_id: str | None, target_ref: str | None) -> None:
+        self.view_state.selected_action_id = action_id
+        self.view_state.selected_action_target_ref = target_ref
 
     @property
     def current_frame(self) -> WorldFrameProjection | None:

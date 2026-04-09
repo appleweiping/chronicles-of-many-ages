@@ -13,6 +13,12 @@ class TimeController:
 
     def pause(self) -> None:
         self.session.set_running(False)
+        self.session.view_state.speed_mode = "paused"
 
     def resume(self) -> None:
         self.session.set_running(True)
+        self.session.view_state.speed_mode = "normal"
+
+    def burst(self) -> None:
+        self.session.set_running(True)
+        self.session.view_state.speed_mode = "burst"
