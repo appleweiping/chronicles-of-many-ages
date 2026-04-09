@@ -59,6 +59,8 @@ class GuiGameplayLayerTests(unittest.TestCase):
         self.assertTrue(all(group.title in {"Major Shifts", "Regional Chronicle", "Signals And Rumors"} for group in groups))
 
     def test_intervention_cards_use_player_language_and_preview(self) -> None:
-        options = build_intervention_options("settlement:1")
+        world = create_world(default_config(seed=134))
+        settlement_ref = next(iter(world.settlements))
+        options = build_intervention_options(world, settlement_ref)
         self.assertTrue(any(option.label == "Bless Harvest" for option in options))
         self.assertTrue(any(option.preview_lines for option in options if option.action_id == "resource"))

@@ -14,14 +14,18 @@ class ChroniclePanel(QWidget):
         self._history_groups: tuple[TimelineGroupProjection, ...] = ()
         self._show_history = False
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
         self.title = QLabel("Chronicle")
-        self.title.setStyleSheet("font-size: 16px; font-weight: 700; color: #f4f1de;")
-        self.toggle_button = QPushButton("Show Historical Nodes")
+        self.title.setStyleSheet("font-size: 14px; font-weight: 700; color: #f4f1de;")
+        self.toggle_button = QPushButton("History")
+        self.toggle_button.setMaximumHeight(28)
         self.toggle_button.clicked.connect(self._toggle_mode)
         layout.addWidget(self.title)
         layout.addWidget(self.toggle_button)
         self.list_widget = QListWidget()
         self.list_widget.itemClicked.connect(self._handle_click)
+        self.list_widget.setSpacing(2)
         layout.addWidget(self.list_widget)
 
     def set_items(self, items: tuple[ChronicleItemProjection, ...]) -> None:
@@ -42,14 +46,15 @@ class ChroniclePanel(QWidget):
         self.list_widget.clear()
         if self._show_history:
             self.title.setText("Historical Nodes")
-            self.toggle_button.setText("Show Chronicle")
+            self.toggle_button.setText("Chronicle")
             for group in self._history_groups:
                 header = QListWidgetItem(group.title)
                 header.setForeground(QColor("#ffd166"))
                 self.list_widget.addItem(header)
                 for row in group.rows:
-                    item = QListWidgetItem(f"  {row.headline} — {row.detail}")
+                    item = QListWidgetItem(f"  {row.headline}")
                     item.setData(32, row.target_ref)
+                    item.setToolTip(row.detail)
                     tone = {
                         "major": "#ffd166",
                         "notable": "#d6e4ff",
@@ -60,10 +65,11 @@ class ChroniclePanel(QWidget):
             return
 
         self.title.setText("Chronicle")
-        self.toggle_button.setText("Show Historical Nodes")
+        self.toggle_button.setText("History")
         for row in self._chronicle_items:
-            item = QListWidgetItem(f"{row.headline} — {row.detail}")
+            item = QListWidgetItem(row.headline)
             item.setData(32, row.target_ref)
+            item.setToolTip(row.detail)
             tone = {
                 "regional": "#d6e4ff",
                 "civilization": "#ffd166",

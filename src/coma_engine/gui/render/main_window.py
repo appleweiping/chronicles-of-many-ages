@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QMainWindow, QSplitter, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QVBoxLayout, QWidget
 
 from coma_engine.gui.interaction import (
     CameraController,
@@ -19,7 +19,6 @@ from coma_engine.gui.presentation import (
     build_intervention_options,
     build_timeline_groups,
     build_top_bar,
-    build_world_status,
     pick_default_focus_ref,
 )
 from coma_engine.gui.render.map_scene import MapScene
@@ -28,7 +27,6 @@ from coma_engine.gui.render.panels.action_ribbon import ActionRibbon
 from coma_engine.gui.render.panels.alert_panel import AlertPanel
 from coma_engine.gui.render.panels.chronicle_panel import ChroniclePanel
 from coma_engine.gui.render.panels.inspector_panel import InspectorPanel
-from coma_engine.gui.render.panels.status_panel import StatusPanel
 from coma_engine.gui.render.panels.timeline_panel import TimelinePanel
 from coma_engine.gui.render.panels.top_bar import TopBar
 from coma_engine.gui.session import GuiSession
@@ -65,36 +63,35 @@ class MainWindow(QMainWindow):
         self.top_bar = TopBar(self._step_once, self._pause, self._resume)
         root_layout.addWidget(self.top_bar)
 
-        shell = QSplitter()
-        root_layout.addWidget(shell, stretch=1)
+        stage_shell = QWidget()
+        stage_layout = QHBoxLayout(stage_shell)
+        stage_layout.setContentsMargins(0, 0, 0, 0)
+        stage_layout.setSpacing(8)
+        root_layout.addWidget(stage_shell, stretch=6)
 
         self.left_column = QWidget()
+        self.left_column.setMinimumWidth(132)
+        self.left_column.setMaximumWidth(170)
         left_layout = QVBoxLayout(self.left_column)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(6)
+        left_layout.setSpacing(4)
         self.alert_panel = AlertPanel(self._on_alert_select)
         self.chronicle_panel = ChroniclePanel(self._on_focus_select)
-        left_layout.addWidget(self.alert_panel, stretch=4)
-        left_layout.addWidget(self.chronicle_panel, stretch=6)
-        shell.addWidget(self.left_column)
+        left_layout.addWidget(self.alert_panel, stretch=5)
+        left_layout.addWidget(self.chronicle_panel, stretch=4)
+        stage_layout.addWidget(self.left_column, stretch=1)
 
         self.map_scene = MapScene(session.projections, self._on_select)
         self.map_view = MapView(self.map_scene)
-        shell.addWidget(self.map_view)
+        stage_layout.addWidget(self.map_view, stretch=9)
 
-        self.right_column = QWidget()
-        right_layout = QVBoxLayout(self.right_column)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(6)
-        self.status_panel = StatusPanel()
+        bottom_shell = QWidget()
+        bottom_layout = QHBoxLayout(bottom_shell)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(8)
+
         self.inspector_panel = InspectorPanel(self._on_affordance)
-        right_layout.addWidget(self.status_panel)
-        right_layout.addWidget(self.inspector_panel, stretch=1)
         self.debug_panel = TimelinePanel(title="Debug Trace") if self.session.view_state.debug_mode else None
-        if self.debug_panel is not None:
-            right_layout.addWidget(self.debug_panel, stretch=1)
-        shell.addWidget(self.right_column)
-        shell.setSizes([180, 990, 330])
 
         self.action_ribbon = ActionRibbon(
             self._step_once,
@@ -107,7 +104,9 @@ class MainWindow(QMainWindow):
             self._cycle_overlay,
             self._review_objectives,
         )
-        root_layout.addWidget(self.action_ribbon)
+        bottom_layout.addWidget(self.action_ribbon, stretch=8)
+        bottom_layout.addWidget(self.inspector_panel, stretch=2)
+        root_layout.addWidget(bottom_shell, stretch=1)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick_if_running)
@@ -156,13 +155,8 @@ class MainWindow(QMainWindow):
             self._refresh_from_frame(self.session.current_frame)
 
     def _review_objectives(self) -> None:
-        if self.session.world.player_state.active_objectives:
-            self.status_panel.summary_label.setText(
-                "  |  ".join(
-                    f"{objective.objective_type} {objective.progress:.0f}/{objective.threshold:.0f}"
-                    for objective in self.session.world.player_state.active_objectives[:3]
-                )
-            )
+        if self.session.world.player_state.active_objectives and self.session.current_frame is not None:
+            self._refresh_from_frame(self.session.current_frame)
 
     def _select_action(self, action_id: str, target_ref: str) -> None:
         self.session.select_action(action_id, target_ref)
@@ -249,8 +243,6 @@ class MainWindow(QMainWindow):
             selected_ref = fallback
 
         self.top_bar.render(build_top_bar(self.session.world, frame, self.session.view_state))
-        status = build_world_status(self.session.world, frame)
-        self.status_panel.update_from_frame(frame, selected_ref, status)
         self.alert_panel.set_alerts(alerts)
         self.chronicle_panel.set_items(build_chronicle_stream(self.session.world, frame))
         self.chronicle_panel.set_history_groups(build_timeline_groups(self.session.world, frame, historical_scale=True))
@@ -260,7 +252,7 @@ class MainWindow(QMainWindow):
         if selected_ref is not None:
             panel = build_inspection_panel(self.session.world, selected_ref, debug_mode=self.session.view_state.debug_mode)
             self.inspector_panel.render_panel(panel)
-            options = build_intervention_options(selected_ref)
+            options = build_intervention_options(self.session.world, selected_ref)
             if self.session.view_state.selected_action_target_ref != selected_ref:
                 default_option = next((option for option in options if option.enabled), None)
                 self.session.select_action(default_option.action_id if default_option else None, selected_ref)

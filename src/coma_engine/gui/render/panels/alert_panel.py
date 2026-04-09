@@ -21,9 +21,10 @@ class AlertPanel(QWidget):
     def set_alerts(self, alerts: tuple[AlertItemProjection, ...]) -> None:
         self.list_widget.clear()
         for alert in alerts:
-            item = QListWidgetItem(f"{alert.title} — {alert.detail}")
+            item = QListWidgetItem(alert.title)
             item.setData(32, alert.target_ref)
             item.setData(33, alert.suggested_map_mode)
+            item.setToolTip(alert.detail)
             tone = {
                 "critical": "#ff7b54",
                 "major": "#ffd166",

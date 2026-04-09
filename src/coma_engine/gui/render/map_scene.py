@@ -15,7 +15,7 @@ from coma_engine.gui.sync.projection_store import ProjectionStore
 from coma_engine.gui.types import MapMode, TileRenderProjection
 
 
-TILE_SIZE = 28
+TILE_SIZE = 32
 
 
 class MapScene(QGraphicsScene):

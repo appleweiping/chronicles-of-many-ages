@@ -18,6 +18,7 @@ class MapView(QGraphicsView):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setStyleSheet("background-color: #0f1720; border: 1px solid #243241;")
+        self.scale(1.08, 1.08)
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # type: ignore[override]
         zoom = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
