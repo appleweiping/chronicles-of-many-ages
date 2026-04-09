@@ -45,7 +45,6 @@ def _mode_for_entry(event_type: str) -> str:
 
 
 def build_alert_stack(world: WorldState, frame: WorldFrameProjection, limit: int = 8) -> tuple[AlertItemProjection, ...]:
-    del world
     alerts: list[AlertItemProjection] = []
     for entry in frame.timeline_entries:
         if entry.visibility == "hidden":
@@ -64,23 +63,61 @@ def build_alert_stack(world: WorldState, frame: WorldFrameProjection, limit: int
                 visibility=entry.visibility,
             )
         )
-    if not alerts:
-        for tile in sorted(frame.tiles, key=lambda item: item.attention_score, reverse=True):
-            if tile.known_visibility == "hidden" or tile.attention_score < 30.0:
-                continue
-            alerts.append(
-                AlertItemProjection(
-                    title=f"Hotspot At {tile.ref}",
-                    detail=", ".join(tile.attention_tags[:2]),
-                    target_ref=tile.ref,
-                    severity="major" if tile.attention_band in {"urgent", "critical"} else "notable",
-                    related_timeline_event_id=None,
-                    suggested_map_mode="pressure" if tile.command_stress_level >= tile.scarcity_level else "world",
-                    visibility=tile.known_visibility,
-                )
+    existing_targets = {alert.target_ref for alert in alerts if alert.target_ref is not None}
+    for tile in sorted(
+        frame.tiles,
+        key=lambda item: (item.change_intensity + item.attention_score * 0.22 + max(0.0, item.pressure_delta) * 0.7),
+        reverse=True,
+    ):
+        if tile.known_visibility == "hidden" or tile.ref in existing_targets:
+            continue
+        if tile.attention_score < 26.0 and tile.change_intensity < 8.0 and tile.command_stress_level < 28.0:
+            continue
+        if tile.pressure_delta >= 6.0 or tile.change_direction == "rising":
+            title = f"Instability Rising At {tile.ref}"
+            detail = ", ".join(tile.attention_tags[:3])
+            severity = "critical" if tile.command_stress_level >= 55.0 else "major"
+            mode = "pressure"
+        elif tile.signal_delta >= 4.0 or tile.signal_level >= 12.0:
+            title = f"Signals Spreading Near {tile.ref}"
+            detail = ", ".join(tile.attention_tags[:3])
+            severity = "major" if tile.signal_level >= 16.0 else "notable"
+            mode = "infoflow"
+        elif tile.change_direction == "falling" and tile.command_stress_level < 32.0:
+            title = f"Conditions Easing Near {tile.ref}"
+            detail = ", ".join(tile.attention_tags[:2])
+            severity = "notable"
+            mode = "world"
+        else:
+            title = f"Hotspot At {tile.ref}"
+            detail = ", ".join(tile.attention_tags[:2])
+            severity = "major" if tile.attention_band in {"urgent", "critical"} else "notable"
+            mode = "pressure" if tile.command_stress_level >= tile.scarcity_level else "world"
+        alerts.append(
+            AlertItemProjection(
+                title=title,
+                detail=detail,
+                target_ref=tile.ref,
+                severity=severity,
+                related_timeline_event_id=None,
+                suggested_map_mode=mode,
+                visibility=tile.known_visibility,
             )
-            if len(alerts) >= limit:
-                break
+        )
+        if len(alerts) >= limit:
+            break
+    if not alerts:
+        alerts.append(
+            AlertItemProjection(
+                title=f"Watch {world.current_step}",
+                detail="No major tensions are visible yet, but the world is still shifting.",
+                target_ref=frame.tiles[0].ref if frame.tiles else None,
+                severity="notable",
+                related_timeline_event_id=None,
+                suggested_map_mode="world",
+                visibility="confirmed",
+            )
+        )
     return tuple(alerts[:limit])
 
 

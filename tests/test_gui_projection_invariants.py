@@ -6,7 +6,11 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from PySide6.QtWidgets import QApplication
+
 from coma_engine.config.schema import default_config
+from coma_engine.gui.presentation import build_alert_stack
+from coma_engine.gui.render.map_scene import MapScene
 from coma_engine.gui.session import GuiSession
 from coma_engine.gui.sync.world_projector import WorldProjector
 from coma_engine.simulation.phases import _found_polity
@@ -15,6 +19,10 @@ from coma_engine.systems.propagation import emit_info_packet, propagate_info_pac
 
 
 class GuiProjectionInvariantTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._app = QApplication.instance() or QApplication([])
+
     def test_world_projector_preserves_tile_count_and_step(self) -> None:
         world = create_world(default_config(seed=101))
         frame = WorldProjector().project(world)
@@ -50,3 +58,30 @@ class GuiProjectionInvariantTests(unittest.TestCase):
         session.step_once()
         self.assertIs(session.world, world)
         self.assertEqual(session.current_frame.time_state.step, world.current_step)  # type: ignore[union-attr]
+        self.assertIsNotNone(session.projections.previous)
+        self.assertGreaterEqual(len(session.projections.recent), 2)
+
+    def test_map_scene_renders_alert_driven_visual_signal_layer(self) -> None:
+        world = create_world(default_config(seed=104))
+        session = GuiSession(world)
+        session.step_once()
+        frame = session.current_frame
+        assert frame is not None
+        alerts = build_alert_stack(world, frame)
+        scene = MapScene(session.projections, lambda _ref: None)
+        scene.render_frame({"terrain", "power", "attention", "signals"}, None, "world", alerts=alerts)
+        first_count = len(scene.items())
+        scene.advance_animation()
+        second_count = len(scene.items())
+        self.assertGreater(first_count, len(frame.tiles))
+        self.assertGreater(second_count, len(frame.tiles))
+
+    def test_world_projector_exposes_dynamic_hotspots_after_change(self) -> None:
+        world = create_world(default_config(seed=105))
+        session = GuiSession(world)
+        session.step_once()
+        session.step_once()
+        frame = session.current_frame
+        assert frame is not None
+        self.assertIsNotNone(session.projections.previous)
+        self.assertIsInstance(frame.dynamic_hotspots, tuple)

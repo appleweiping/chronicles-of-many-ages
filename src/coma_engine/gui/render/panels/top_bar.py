@@ -23,6 +23,14 @@ class TopBar(QWidget):
         self.objective_label.setMinimumWidth(220)
         self.atmosphere_label = QLabel("")
         self.atmosphere_label.setWordWrap(True)
+        self.scenario_label.setStyleSheet("font-weight: 700; color: #f8f3d4;")
+        self.step_label.setStyleSheet("color: #ffd166;")
+        self.time_label.setStyleSheet("color: #c7d3e0;")
+        self.speed_label.setStyleSheet("color: #9ad1d4;")
+        self.influence_label.setStyleSheet("color: #b8f2e6;")
+        self.visibility_label.setStyleSheet("color: #d7e3fc;")
+        self.objective_label.setStyleSheet("color: #f6bd60;")
+        self.atmosphere_label.setStyleSheet("color: #e3edf7;")
 
         for widget in (
             self.scenario_label,

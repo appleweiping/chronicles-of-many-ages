@@ -40,6 +40,12 @@ class TileRenderProjection:
     signal_level: float
     scarcity_level: float
     command_stress_level: float
+    activity_delta: float
+    attention_delta: float
+    pressure_delta: float
+    signal_delta: float
+    change_intensity: float
+    change_direction: Literal["rising", "falling", "steady"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -196,6 +202,7 @@ class WorldFrameProjection:
     entity_cards: tuple[EntityCardProjection, ...]
     timeline_entries: tuple[TimelineEntryProjection, ...]
     info_flows: tuple[InfoFlowProjection, ...]
+    dynamic_hotspots: tuple[str, ...] = ()
     overlay_defaults: tuple[str, ...] = ("terrain", "power", "attention", "signals")
 
 
